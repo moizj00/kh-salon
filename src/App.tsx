@@ -18,6 +18,7 @@ import {
   startSync,
   submit,
   subscribe,
+  syncState,
   wipeLocalData,
 } from "./lib/outbox";
 import type { OutboxItem } from "./lib/outbox/types";
@@ -51,6 +52,7 @@ import {
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabKey>("today");
   const [items, setItems] = useState<OutboxItem[]>([]);
+  const [outboxState, setOutboxState] = useState(syncState());
   const [salons, setSalons] = useState<Salon[]>(INITIAL_SALONS);
   const [route, setRoute] = useState<RouteStop[]>(INITIAL_ROUTE);
   const [orders, setOrders] = useState<DeliveryOrder[]>(INITIAL_ORDERS);
@@ -102,6 +104,7 @@ export default function App() {
     const refreshOutbox = async () => {
       const all = await listItems();
       setItems(all);
+      setOutboxState(syncState());
     };
 
     void refreshOutbox();
@@ -180,10 +183,26 @@ export default function App() {
     }
   };
 
-  // 3. Log Visit & Note
+  // 3. Log Visit & Note (with GPS Evidence Capture)
   const handleLogVisit = async () => {
     if (!currentSalon) return;
     setShowVisitModal(false);
+
+    let gps: { lat: number; lng: number } | null = null;
+    if (typeof navigator !== "undefined" && "geolocation" in navigator) {
+      gps = await new Promise((resolve) => {
+        navigator.geolocation.getCurrentPosition(
+          (p) =>
+            resolve({
+              lat: Number(p.coords.latitude.toFixed(6)),
+              lng: Number(p.coords.longitude.toFixed(6)),
+            }),
+          () => resolve(null),
+          { enableHighAccuracy: true, timeout: 5000, maximumAge: 60000 },
+        );
+      });
+    }
+
     const id = `vst-${Date.now()}`;
     const res = await submit({
       id,
@@ -192,18 +211,21 @@ export default function App() {
         p_id: id,
         p_salon_id: currentSalon.id,
         p_notes: visitNotes,
+        p_lat: gps?.lat ?? null,
+        p_lng: gps?.lng ?? null,
         p_at_client: new Date().toISOString(),
       },
-      label: `Visit: ${currentSalon.name}`,
+      label: `Visit: ${currentSalon.name}${gps ? " (GPS Captured)" : ""}`,
       salonId: currentSalon.id,
       capturedAt: new Date().toISOString(),
     });
 
     setVisitNotes("");
+    const gpsMsg = gps ? " (GPS evidence attached)" : "";
     if (res === "queued") {
-      showToast(`Visit for ${currentSalon.name} saved on phone.`, "info");
+      showToast(`Visit for ${currentSalon.name} saved on phone${gpsMsg}.`, "info");
     } else {
-      showToast(`Visit logged and synced to server.`, "ok");
+      showToast(`Visit logged${gpsMsg} and synced to server.`, "ok");
     }
   };
 
@@ -1118,20 +1140,47 @@ export default function App() {
                       </div>
                     )}
 
+                    {outboxState.transmittingIds?.includes(item.id) && (
+                      <div className="space-y-1 py-1">
+                        <div className="flex items-center justify-between text-[10px] font-semibold text-[#7a2e4a] dark:text-[#d77a9c]">
+                          <span className="flex items-center gap-1">
+                            <RefreshCw className="w-3 h-3 animate-spin" />
+                            Transmitting to server...
+                          </span>
+                          <span>{outboxState.activeProgress?.[item.id] ?? 50}%</span>
+                        </div>
+                        <div className="w-full h-1.5 bg-[#e6dfdb] dark:bg-[#3a3330] rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-[#7a2e4a] dark:bg-[#d77a9c] transition-all duration-300 ease-out"
+                            style={{ width: `${outboxState.activeProgress?.[item.id] ?? 50}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
                     <div className="pt-1 flex justify-end gap-2">
                       <button
                         type="button"
                         onClick={() => discardItem(item.id)}
-                        className="px-2 py-1 text-rose-600 hover:underline"
+                        disabled={outboxState.transmittingIds?.includes(item.id)}
+                        className="px-2 py-1 text-rose-600 hover:underline disabled:opacity-40"
                       >
                         Discard
                       </button>
                       <button
                         type="button"
                         onClick={() => retryItem(item.id)}
-                        className="px-2.5 py-1 bg-[#7a2e4a] text-white rounded font-medium"
+                        disabled={outboxState.transmittingIds?.includes(item.id)}
+                        className="px-2.5 py-1 bg-[#7a2e4a] text-white rounded font-medium disabled:opacity-40 flex items-center gap-1"
                       >
-                        Retry
+                        {outboxState.transmittingIds?.includes(item.id) ? (
+                          <>
+                            <RefreshCw className="w-3 h-3 animate-spin" />
+                            <span>Transmitting...</span>
+                          </>
+                        ) : (
+                          <span>Retry</span>
+                        )}
                       </button>
                     </div>
                   </div>

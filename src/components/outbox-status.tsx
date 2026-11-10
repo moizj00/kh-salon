@@ -164,9 +164,29 @@ export const OutboxStatus: React.FC = () => {
                   </span>
                 </div>
 
-                <div className="text-rose-700 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/30 p-2 rounded text-[11px]">
-                  <strong>Refusal reason:</strong> {item.error || "The server rejected this submission."}
-                </div>
+                {item.error && (
+                  <div className="text-rose-700 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/30 p-2 rounded text-[11px]">
+                    <strong>Refusal reason:</strong> {item.error || "The server rejected this submission."}
+                  </div>
+                )}
+
+                {state.transmittingIds?.includes(item.id) && (
+                  <div className="space-y-1 py-1">
+                    <div className="flex items-center justify-between text-[10px] font-semibold text-[#7a2e4a] dark:text-[#d77a9c]">
+                      <span className="flex items-center gap-1">
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                        Transmitting to server...
+                      </span>
+                      <span>{state.activeProgress?.[item.id] ?? 50}%</span>
+                    </div>
+                    <div className="w-full h-1.5 bg-[#e6dfdb] dark:bg-[#3a3330] rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-[#7a2e4a] dark:bg-[#d77a9c] transition-all duration-300 ease-out"
+                        style={{ width: `${state.activeProgress?.[item.id] ?? 50}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
 
                 <div className="flex items-center justify-end gap-2 pt-1">
                   {confirmDiscardId === item.id ? (
@@ -191,8 +211,9 @@ export const OutboxStatus: React.FC = () => {
                     <>
                       <button
                         type="button"
-                        onClick={() => setConfirmDiscardId(item.id)}
-                        className="flex items-center gap-1 px-2.5 py-1 text-[#6b625e] hover:text-rose-600 font-medium rounded"
+                        onClick={() => handleDiscard(item.id)}
+                        disabled={state.transmittingIds?.includes(item.id)}
+                        className="flex items-center gap-1 px-2.5 py-1 text-[#6b625e] hover:text-rose-600 font-medium rounded disabled:opacity-40"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                         <span>Discard</span>
@@ -200,10 +221,11 @@ export const OutboxStatus: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => handleRetry(item.id)}
-                        className="flex items-center gap-1 px-2.5 py-1 bg-[#7a2e4a] text-white font-medium rounded hover:opacity-90"
+                        disabled={state.transmittingIds?.includes(item.id)}
+                        className="flex items-center gap-1 px-2.5 py-1 bg-[#7a2e4a] text-white font-medium rounded hover:opacity-90 disabled:opacity-40"
                       >
-                        <RefreshCw className="w-3.5 h-3.5" />
-                        <span>Retry</span>
+                        <RefreshCw className={`w-3.5 h-3.5 ${state.transmittingIds?.includes(item.id) ? "animate-spin" : ""}`} />
+                        <span>{state.transmittingIds?.includes(item.id) ? "Transmitting..." : "Retry"}</span>
                       </button>
                     </>
                   )}

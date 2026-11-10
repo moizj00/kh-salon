@@ -9,6 +9,7 @@ const DRAIN_LOCK = "kiran.outbox.drain";
 const CHANNEL = "kiran.outbox";
 const SYNC_INTERVAL_MS = 30_000;
 const SUBMIT_WAIT_MS = 3_000;
+const STALL_TIMEOUT_MS = 30_000;
 
 export type SubmitInput = {
   id: string;
@@ -25,7 +26,13 @@ export type SyncState = {
   lastSyncAt: number | null;
   error: string | null;
   simulatedOffline: boolean;
+  transmittingIds: string[];
+  activeProgress: Record<string, number>;
 };
+
+const inFlightItemIds = new Set<string>();
+const transmittingProgress = new Map<string, number>();
+const itemStallTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 const listeners = new Set<() => void>();
 const local: {
@@ -38,10 +45,38 @@ const local: {
     lastSyncAt: null,
     error: null,
     simulatedOffline: false,
+    transmittingIds: [],
+    activeProgress: {},
   },
   draining: null,
   channel: null,
 };
+
+function setItemProgress(id: string, percent: number | null) {
+  if (percent === null) {
+    inFlightItemIds.delete(id);
+    transmittingProgress.delete(id);
+    if (itemStallTimers.has(id)) {
+      clearTimeout(itemStallTimers.get(id));
+      itemStallTimers.delete(id);
+    }
+  } else {
+    inFlightItemIds.add(id);
+    transmittingProgress.set(id, Math.min(100, Math.max(0, percent)));
+
+    if (!itemStallTimers.has(id)) {
+      const timer = setTimeout(() => {
+        setItemProgress(id, null);
+      }, STALL_TIMEOUT_MS);
+      itemStallTimers.set(id, timer);
+    }
+  }
+  changed();
+}
+
+export function isItemTransmitting(id: string): boolean {
+  return inFlightItemIds.has(id);
+}
 
 const tellListeners = () => {
   listeners.forEach((listener) => {
@@ -63,7 +98,12 @@ const channel = (): BroadcastChannel | null => {
 };
 
 const changed = (state: Partial<SyncState> = {}) => {
-  local.state = { ...local.state, ...state };
+  local.state = {
+    ...local.state,
+    ...state,
+    transmittingIds: Array.from(inFlightItemIds),
+    activeProgress: Object.fromEntries(transmittingProgress.entries()),
+  };
   tellListeners();
   try {
     channel()?.postMessage("changed");
@@ -99,72 +139,90 @@ export function setSessionUserId(id: string) {
 }
 
 // In-app mock execution handler when live DB is offline or for simulated testing
-const mockServerDispatch = async (fn: OutboxFn, args: Record<string, unknown>): Promise<unknown> => {
-  // Artificial slight network latency
-  await new Promise((r) => setTimeout(r, 400));
-  
+const mockServerDispatch = async (fn: OutboxFn, args: Record<string, unknown>, itemId?: string): Promise<unknown> => {
+  const id = itemId || (args.p_id as string) || (args.id as string);
+
+  if (id) {
+    setItemProgress(id, 15);
+  }
+
+  await new Promise((r) => setTimeout(r, 200));
+
+  if (id && inFlightItemIds.has(id)) {
+    setItemProgress(id, 45);
+  }
+
   if (isOffline()) {
+    if (id) setItemProgress(id, null);
     throw new Error("Network unreachable (offline)");
   }
 
+  await new Promise((r) => setTimeout(r, 250));
+
+  if (id && inFlightItemIds.has(id)) {
+    setItemProgress(id, 80);
+  }
+
+  let result: unknown = { success: true, fn, timestamp: new Date().toISOString() };
+
   // Realistic mock validations and outcomes:
   if (fn === "rep_check_in") {
+    if (args.p_fail || args.fail) {
+      if (id) setItemProgress(id, null);
+      throw new Error("Invalid check-in parameters. Count cannot be negative.");
+    }
     const bagCount = (args.p_bag_count ?? args.bag_count) as number | undefined;
-    return {
+    result = {
       rep_day_id: "day-" + Date.now(),
       status: "open",
       opened_at: new Date().toISOString(),
       bag_variance_units: 0,
       initial_count: bagCount ?? 24,
     };
-  }
-
-  if (fn === "log_visit") {
-    return {
+  } else if (fn === "log_visit") {
+    result = {
       visit_id: args.p_id ?? "visit-" + Date.now(),
       status: "completed",
       recorded_at: new Date().toISOString(),
     };
-  }
-
-  if (fn === "rep_record_payment") {
+  } else if (fn === "rep_record_payment") {
     const amount = Number(args.p_amount ?? args.amount ?? 0);
-    return {
+    result = {
       payment_id: args.p_id ?? "pay-" + Date.now(),
       amount,
       currency: "PKR",
       status: "receipt_pending",
     };
-  }
-
-  if (fn === "create_salon") {
-    return {
+  } else if (fn === "create_salon") {
+    result = {
       salon_id: args.p_id ?? "sal-" + Date.now(),
       name: args.p_name,
       status: "prospect",
     };
-  }
-
-  if (fn === "rep_submit_delivery") {
-    return {
+  } else if (fn === "rep_submit_delivery") {
+    result = {
       submission_id: args.p_id ?? "del-" + Date.now(),
       order_id: args.p_order_id,
       status: "submitted",
     };
-  }
-
-  if (fn === "rep_attach_signature") {
-    return {
+  } else if (fn === "rep_attach_signature") {
+    result = {
       signature_id: args.p_id ?? "sig-" + Date.now(),
       attached: true,
     };
   }
 
-  return { success: true, fn, timestamp: new Date().toISOString() };
+  if (id) {
+    setItemProgress(id, 100);
+    await new Promise((r) => setTimeout(r, 100));
+    setItemProgress(id, null);
+  }
+
+  return result;
 };
 
-const send = async (fn: OutboxFn, args: Record<string, unknown>): Promise<unknown> => {
-  return await mockServerDispatch(fn, args);
+const send = async (fn: OutboxFn, args: Record<string, unknown>, itemId?: string): Promise<unknown> => {
+  return await mockServerDispatch(fn, args, itemId);
 };
 
 const withDrainLock = async <T>(run: () => Promise<T>): Promise<T | "busy"> => {
@@ -219,6 +277,15 @@ export const quietSync = async (): Promise<void> => {
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function submit(input: SubmitInput): Promise<"sent" | "queued" | "rejected"> {
+  // Prevent duplicate submission of the same action ID if already in-flight or rapidly tapped
+  if (inFlightItemIds.has(input.id)) {
+    console.warn(`[Outbox] Duplicate submission prevented for action ID: ${input.id}`);
+    const store = await openIdbStore();
+    const mine = await store.list(await captureUserId());
+    const existing = mine.find((it) => it.id === input.id);
+    if (existing) return existing.state === "rejected" ? "rejected" : "queued";
+  }
+
   const userId = await captureUserId();
   const store = await openIdbStore();
   await enqueue(store, { ...input, userId, dependsOn: input.dependsOn ?? null });
@@ -239,13 +306,26 @@ export async function listItems(): Promise<OutboxItem[]> {
 }
 
 export async function retryItem(id: string): Promise<void> {
-  const store = await openIdbStore();
-  await retry(store, id);
-  changed();
-  await quietSync();
+  // Prevent duplicate submission of the same action ID if user taps retry rapidly or sync is in flight
+  if (inFlightItemIds.has(id)) {
+    console.warn(`[Outbox] Retry ignored for action ID ${id} as it is already transmitting.`);
+    return;
+  }
+
+  setItemProgress(id, 5);
+  try {
+    const store = await openIdbStore();
+    await retry(store, id);
+    changed();
+    await quietSync();
+  } catch (err) {
+    setItemProgress(id, null);
+    throw err;
+  }
 }
 
 export async function discardItem(id: string): Promise<void> {
+  setItemProgress(id, null);
   const store = await openIdbStore();
   await store.remove(id);
   changed();
@@ -291,5 +371,9 @@ export async function wipeLocalData(): Promise<void> {
   if (typeof window !== "undefined") {
     window.localStorage.removeItem(USER_KEY);
   }
-  changed({ held: "none", lastSyncAt: null, error: null });
+  inFlightItemIds.clear();
+  transmittingProgress.clear();
+  itemStallTimers.forEach((t) => clearTimeout(t));
+  itemStallTimers.clear();
+  changed({ held: "none", lastSyncAt: null, error: null, transmittingIds: [], activeProgress: {} });
 }

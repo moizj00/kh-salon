@@ -1,87 +1,111 @@
 import { classifyFailure, failureMessage } from "./classify";
-import { dueItems } from "./queue";
-import type { OutboxItem, OutboxStore } from "./types";
+import type { OutboxFn, OutboxItem, OutboxStore } from "./types";
 
-export type DrainReport = {
-  sent: number;
-  rejected: number;
-  held: "none" | "auth" | "offline";
-};
+// One pass over a rep's queue (P1-09, NFR-01). Items are sent strictly in capture order, one at a
+// time: a visit must not reach the database before the check-in captured ahead of it. So the
+// oldest pending item is always the next one, and an item that has to wait makes the items behind
+// it wait too. A refused item is the exception: it is set aside for the rep and the pass goes on.
 
 export type DrainDeps = {
   store: OutboxStore;
   userId: string;
-  send: (fn: OutboxItem["fn"], args: Record<string, unknown>) => Promise<unknown>;
+  /** Sends one item through its app.* function. Throws on any failure, with `code` and `status` when known. */
+  send: (fn: OutboxFn, args: Record<string, unknown>, itemId?: string) => Promise<unknown>;
   now: () => number;
+  /** Runs one drain at a time across tabs; answers "busy" when another drain holds the lock. */
   lock: <T>(run: () => Promise<T>) => Promise<T | "busy">;
 };
 
-const MAX_STEPS_PER_PASS = 30;
+/** `held` says why the pass stopped early: "offline" (try again later) or "auth" (the rep must act). */
+export type DrainReport = { sent: number; rejected: number; held: "none" | "offline" | "auth" };
+
 const NOTHING_DONE: DrainReport = { sent: 0, rejected: 0, held: "none" };
 
-// Exponential backoff with jitter: 2s, 4s, 8s, up to 60s
-const backoffMs = (attempts: number): number => {
-  const base = Math.min(60_000, 2_000 * Math.pow(2, Math.max(0, attempts)));
-  return base + Math.floor(Math.random() * 500);
+const BACKOFF_BASE_MS = 5_000;
+const BACKOFF_FACTOR = 2;
+const BACKOFF_CAP_MS = 30_000;
+/** A reconnect is picked up well inside 60 s (NFR-01): 5 s, 10 s, 20 s, then every 30 s. */
+export const backoffMs = (attempts: number): number => Math.min(BACKOFF_BASE_MS * BACKOFF_FACTOR ** attempts, BACKOFF_CAP_MS);
+
+// A store that never changes an item would otherwise keep a pass going for ever.
+const MAX_STEPS_PER_PASS = 500;
+
+const PARENT_REFUSED = "its delivery was refused: ";
+const PARENT_GONE = "the delivery it belongs to is no longer waiting on this phone";
+const PARENT_ID_MISSING = "the server did not say which delivery this belongs to";
+
+/** The `id` of what the function returned: the row's id, or the value itself when it returns a bare id. */
+const idOf = (result: unknown): string | null => {
+  if (typeof result === "string" && result) return result;
+  const id = typeof result === "object" && result !== null ? (result as { id?: unknown }).id : null;
+  return typeof id === "string" && id ? id : null;
 };
 
-export async function drain(deps: DrainDeps): Promise<DrainReport> {
-  const runPass = async (): Promise<DrainReport> => {
-    let sent = 0;
-    let rejected = 0;
-    let held: DrainReport["held"] = "none";
+/** Why an item that depends on another cannot be sent, or null when it can. */
+const blockedReason = (item: OutboxItem, queue: OutboxItem[]): string | null => {
+  if (!item.dependsOn) return null;
+  const { itemId, argName } = item.dependsOn;
+  const parent = queue.find((other) => other.id === itemId);
+  if (parent?.state === "rejected") return `${PARENT_REFUSED}${parent.error ?? "no reason was given"}`;
+  const filled = item.args[argName];
+  return filled === undefined || filled === null ? PARENT_GONE : null;
+};
 
-    for (let step = 0; step < MAX_STEPS_PER_PASS; step++) {
-      const due = await dueItems(deps.store, deps.userId, deps.now());
-      if (due.length === 0) break;
+/** Hands the sent item's id to the items that wait for it, before the sent item leaves the queue. */
+const settleDependents = async (store: OutboxStore, sent: OutboxItem, queue: OutboxItem[], result: unknown) => {
+  const id = idOf(result);
+  const dependents = queue.filter((other) => other.dependsOn?.itemId === sent.id);
+  await Promise.all(
+    dependents.map((dependent) =>
+      id === null
+        ? store.update(dependent.id, { state: "rejected", error: PARENT_ID_MISSING })
+        : store.update(dependent.id, { args: { ...dependent.args, [dependent.dependsOn?.argName ?? ""]: id } }),
+    ),
+  );
+  return id === null ? dependents.filter((dependent) => dependent.state === "pending").length : 0;
+};
 
-      const head = due[0];
+type Outcome = { report: DrainReport; goOn: boolean };
 
-      // Handle dependencies
-      if (head.dependsOn) {
-        const mine = await deps.store.list(deps.userId);
-        const parent = mine.find((it) => it.id === head.dependsOn?.itemId);
-        if (parent?.state === "rejected") {
-          await deps.store.update(head.id, {
-            state: "rejected",
-            error: `Parent "${parent.label}" was rejected.`,
-          });
-          rejected++;
-          continue;
-        }
-      }
+/** Sends the oldest pending item, or decides why it cannot be sent. */
+const step = async (deps: DrainDeps, report: DrainReport): Promise<Outcome> => {
+  const queue = await deps.store.list(deps.userId);
+  const head = queue.find((item) => item.state === "pending");
+  if (!head) return { report, goOn: false };
+  if (head.nextAttemptAt > deps.now()) return { report: { ...report, held: "offline" }, goOn: false };
 
-      try {
-        await deps.send(head.fn, head.args);
-        await deps.store.remove(head.id);
-        sent++;
-      } catch (err) {
-        const failure = classifyFailure(err);
-        if (failure === "auth") {
-          held = "auth";
-          break;
-        }
-        if (failure === "transient") {
-          const nextAttemptAt = deps.now() + backoffMs(head.attempts);
-          await deps.store.update(head.id, {
-            attempts: head.attempts + 1,
-            nextAttemptAt,
-          });
-          held = "offline";
-          break;
-        }
-        // rejected
-        await deps.store.update(head.id, {
-          state: "rejected",
-          error: failureMessage(err),
-        });
-        rejected++;
-      }
+  const blocked = blockedReason(head, queue);
+  if (blocked !== null) {
+    await deps.store.update(head.id, { state: "rejected", error: blocked });
+    return { report: { ...report, rejected: report.rejected + 1 }, goOn: true };
+  }
+
+  try {
+    const result = await deps.send(head.fn, head.args, head.id);
+    const refused = await settleDependents(deps.store, head, queue, result);
+    await deps.store.remove(head.id);
+    return { report: { ...report, sent: report.sent + 1, rejected: report.rejected + refused }, goOn: true };
+  } catch (error) {
+    const failure = classifyFailure(error);
+    if (failure === "auth") return { report: { ...report, held: "auth" }, goOn: false };
+    if (failure === "transient") {
+      const nextAttemptAt = deps.now() + backoffMs(head.attempts);
+      await deps.store.update(head.id, { attempts: head.attempts + 1, nextAttemptAt });
+      return { report: { ...report, held: "offline" }, goOn: false };
     }
+    await deps.store.update(head.id, { state: "rejected", error: failureMessage(error) });
+    return { report: { ...report, rejected: report.rejected + 1 }, goOn: true };
+  }
+};
 
-    return { sent, rejected, held };
-  };
+const pass = async (deps: DrainDeps, report: DrainReport, stepsLeft: number): Promise<DrainReport> => {
+  if (stepsLeft === 0) return report;
+  const outcome = await step(deps, report);
+  return outcome.goOn ? pass(deps, outcome.report, stepsLeft - 1) : outcome.report;
+};
 
-  const outcome = await deps.lock(runPass);
-  return outcome === "busy" ? NOTHING_DONE : outcome;
+/** Sends what can be sent now. Safe to call as often as wanted: a second caller is told "busy" and does nothing. */
+export async function drain(deps: DrainDeps): Promise<DrainReport> {
+  const done = await deps.lock(() => pass(deps, NOTHING_DONE, MAX_STEPS_PER_PASS));
+  return done === "busy" ? NOTHING_DONE : done;
 }
