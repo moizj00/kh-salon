@@ -1,0 +1,162 @@
+import { newKey, openJson, sealJson } from "./crypto";
+import type { OutboxItem, OutboxPatch, OutboxStore } from "./types";
+
+const DB_NAME = "kiran-outbox";
+const DB_VERSION = 1;
+const ITEMS = "items";
+const KEYS = "keys";
+const BY_ID = "id";
+const BY_USER = "userId";
+
+const UPDATE_TRIES = 5;
+const NO_STORAGE = "This browser will not store data on the phone, so nothing can be saved for later.";
+const STORAGE_FAILED = "The phone's storage refused the request.";
+const UPDATE_LOST = "The waiting list changed while it was being updated. Try again.";
+
+type Sealed = Pick<OutboxItem, "args" | "error" | "label">;
+type StoredItem = Omit<OutboxItem, "args" | "error" | "label"> & { sealed: string };
+
+const settled = <T>(request: IDBRequest<T>): Promise<T> =>
+  new Promise((resolve, reject) => {
+    request.addEventListener("success", () => resolve(request.result));
+    request.addEventListener("error", () => reject(request.error ?? new Error(STORAGE_FAILED)));
+  });
+
+const committed = (tx: IDBTransaction): Promise<void> =>
+  new Promise((resolve, reject) => {
+    tx.addEventListener("complete", () => resolve());
+    tx.addEventListener("error", () => reject(tx.error ?? new Error(STORAGE_FAILED)));
+    tx.addEventListener("abort", () => reject(tx.error ?? new Error(STORAGE_FAILED)));
+  });
+
+const connection: { opening: Promise<IDBDatabase> | null } = { opening: null };
+const keyCache = new Map<string, CryptoKey>();
+
+const openDb = (): Promise<IDBDatabase> =>
+  new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error(NO_STORAGE));
+      return;
+    }
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      const items = db.createObjectStore(ITEMS, { keyPath: "seq", autoIncrement: true });
+      items.createIndex(BY_ID, "id", { unique: true });
+      items.createIndex(BY_USER, "userId");
+      db.createObjectStore(KEYS);
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        connection.opening = null;
+      };
+      resolve(db);
+    };
+    request.onerror = () => reject(request.error ?? new Error(NO_STORAGE));
+    request.onblocked = () => reject(new Error(NO_STORAGE));
+  });
+
+const database = async (): Promise<IDBDatabase> => {
+  connection.opening ??= openDb();
+  try {
+    return await connection.opening;
+  } catch (error) {
+    connection.opening = null;
+    throw error;
+  }
+};
+
+const keyFor = async (db: IDBDatabase, userId: string): Promise<CryptoKey> => {
+  const cached = keyCache.get(userId);
+  if (cached) return cached;
+  const stored: CryptoKey | undefined = await settled(db.transaction(KEYS).objectStore(KEYS).get(userId));
+  const fresh = stored ?? (await newKey());
+  const tx = db.transaction(KEYS, "readwrite");
+  const done = committed(tx);
+  const keys = tx.objectStore(KEYS);
+  const winner: CryptoKey | undefined = await settled(keys.get(userId));
+  if (!winner) keys.put(fresh, userId);
+  await done;
+  const key = winner ?? fresh;
+  keyCache.set(userId, key);
+  return key;
+};
+
+const seal = async (db: IDBDatabase, item: Omit<OutboxItem, "seq">): Promise<Omit<StoredItem, "seq">> => {
+  const { args, error, label, ...plain } = item;
+  const content: Sealed = { args, error, label };
+  return { ...plain, sealed: await sealJson(await keyFor(db, item.userId), content) };
+};
+
+const unseal = async (db: IDBDatabase, record: StoredItem): Promise<OutboxItem> => {
+  const { sealed, ...plain } = record;
+  const content = await openJson<Sealed>(await keyFor(db, record.userId), sealed);
+  return { ...plain, ...content };
+};
+
+const add = async (item: Omit<OutboxItem, "seq">): Promise<OutboxItem> => {
+  const db = await database();
+  const record = await seal(db, item);
+  const tx = db.transaction(ITEMS, "readwrite");
+  const done = committed(tx);
+  const items = tx.objectStore(ITEMS);
+  const existing: StoredItem | undefined = await settled(items.index(BY_ID).get(item.id));
+  if (existing) {
+    await done;
+    return unseal(db, existing);
+  }
+  const seq = await settled(items.add(record));
+  await done;
+  return { ...item, seq: Number(seq) };
+};
+
+const list = async (userId: string): Promise<OutboxItem[]> => {
+  const db = await database();
+  const records: StoredItem[] = await settled(db.transaction(ITEMS).objectStore(ITEMS).index(BY_USER).getAll(userId));
+  const items = await Promise.all(records.map((record) => unseal(db, record)));
+  return items.sort((a, b) => a.seq - b.seq);
+};
+
+const applyPatch = async (id: string, patch: OutboxPatch, triesLeft: number): Promise<void> => {
+  if (triesLeft === 0) throw new Error(UPDATE_LOST);
+  const db = await database();
+  const before: StoredItem | undefined = await settled(db.transaction(ITEMS).objectStore(ITEMS).index(BY_ID).get(id));
+  if (!before) return;
+  const { seq, ...current } = await unseal(db, before);
+  const record = { ...(await seal(db, { ...current, ...patch })), seq };
+  const tx = db.transaction(ITEMS, "readwrite");
+  const done = committed(tx);
+  const items = tx.objectStore(ITEMS);
+  const now: StoredItem | undefined = await settled(items.get(seq));
+  const unchanged = now !== undefined && now.sealed === before.sealed && now.state === before.state;
+  if (unchanged) items.put(record);
+  await done;
+  if (now !== undefined && !unchanged) await applyPatch(id, patch, triesLeft - 1);
+};
+
+const remove = async (id: string): Promise<void> => {
+  const db = await database();
+  const tx = db.transaction(ITEMS, "readwrite");
+  const done = committed(tx);
+  const items = tx.objectStore(ITEMS);
+  const key = await settled(items.index(BY_ID).getKey(id));
+  if (key !== undefined) items.delete(key);
+  await done;
+};
+
+const clear = async (): Promise<void> => {
+  const db = await database();
+  const tx = db.transaction([ITEMS, KEYS], "readwrite");
+  const done = committed(tx);
+  tx.objectStore(ITEMS).clear();
+  tx.objectStore(KEYS).clear();
+  keyCache.clear();
+  await done;
+};
+
+export async function openIdbStore(): Promise<OutboxStore> {
+  await database();
+  return { add, list, update: (id, patch) => applyPatch(id, patch, UPDATE_TRIES), remove, clear };
+}

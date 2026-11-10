@@ -1,0 +1,6 @@
+{
+  "name": "Kiran DMS - Field Sales PWA",
+  "description": "Distribution management for Kiran Company: offline-first field sales rep PWA, outbox sync, salon visits, stock, and orders.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

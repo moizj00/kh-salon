@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="128" fill="#7a2e4a"/>
+  <!-- Subtle circular gradient highlight -->
+  <circle cx="256" cy="180" r="160" fill="#8e3656" opacity="0.4"/>
+  <!-- Stylized Elegant Kiran 'K' with hair flow / salon flourish -->
+  <g fill="none" stroke="#faf7f5" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Vertical stem -->
+    <path d="M 180 130 L 180 382" stroke-width="36"/>
+    <!-- Diagonal up with flourish -->
+    <path d="M 188 266 L 310 148 C 330 128, 360 140, 344 172 L 250 266" stroke-width="30"/>
+    <!-- Diagonal down with graceful curve -->
+    <path d="M 230 246 L 332 374 C 342 388, 362 382, 350 366" stroke-width="32"/>
+    <!-- Gold accent dot / star -->
+    <circle cx="340" cy="145" r="14" fill="#d4af37" stroke="none"/>
+  </g>
+</svg>
