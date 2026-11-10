@@ -30,6 +30,7 @@ import { OutboxStatus } from "./components/outbox-status";
 import { PWAInstallButton } from "./components/pwa-install";
 import { RepMonth } from "./components/rep-month";
 import { SignaturePad } from "./components/signature-pad";
+import { StorefrontView } from "./components/storefront";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -882,6 +883,18 @@ export default function App() {
               </div>
             )}
           </div>
+        )}
+
+        {/* ================= TAB 3.5: PUBLIC SHOP (khsalon.com) ================= */}
+        {activeTab === "shop" && (
+          <StorefrontView
+            onOpenSalonOrderModal={(prodName) => {
+              setSelectedSalonId(salons[0]?.id || "sal-clifton-01");
+              setShowCardModal(true);
+              showToast(`Order details for ${prodName} opened.`, "info");
+            }}
+            showToast={showToast}
+          />
         )}
 
         {/* ================= TAB 4: ORDERS & DELIVERIES ================= */}

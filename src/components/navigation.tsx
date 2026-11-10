@@ -1,7 +1,7 @@
 import React from "react";
-import { Calendar, MapPin, Store, Package, Layers } from "lucide-react";
+import { Calendar, MapPin, Store, Package, Layers, ShoppingBag } from "lucide-react";
 
-export type TabKey = "today" | "route" | "salons" | "orders" | "outbox";
+export type TabKey = "today" | "route" | "salons" | "shop" | "orders" | "outbox";
 
 interface NavigationProps {
   activeTab: TabKey;
@@ -18,13 +18,14 @@ export const BottomNavigation: React.FC<NavigationProps> = ({
     { key: "today" as TabKey, label: "Today", icon: Calendar },
     { key: "route" as TabKey, label: "Route", icon: MapPin },
     { key: "salons" as TabKey, label: "Salons", icon: Store },
+    { key: "shop" as TabKey, label: "Shop", icon: ShoppingBag },
     { key: "orders" as TabKey, label: "Orders", icon: Package },
     { key: "outbox" as TabKey, label: "Outbox", icon: Layers, badge: pendingCount > 0 ? pendingCount : null },
   ];
 
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-[#1d1a19]/95 backdrop-blur-md border-t border-[#e6dfdb] dark:border-[#3a3330] shadow-lg">
-      <div className="max-w-md mx-auto grid grid-cols-5 h-16 items-center px-1">
+      <div className="max-w-md mx-auto grid grid-cols-6 h-16 items-center px-1">
         {tabs.map((t) => {
           const Icon = t.icon;
           const isActive = activeTab === t.key;
