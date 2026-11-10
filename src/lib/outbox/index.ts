@@ -52,6 +52,17 @@ const local: {
   channel: null,
 };
 
+/**
+ * Calculates exponential backoff delay in milliseconds for retrying failed sync operations.
+ * @param attempts Zero-indexed attempt number (0, 1, 2...)
+ * @param baseMs Base delay in milliseconds (default 1000ms)
+ * @param maxMs Maximum delay cap in milliseconds (default 30000ms)
+ */
+export function calculateExponentialBackoff(attempts: number, baseMs = 1000, maxMs = 30000): number {
+  const delay = baseMs * Math.pow(2, Math.max(0, attempts));
+  return Math.min(delay, maxMs);
+}
+
 function setItemProgress(id: string, percent: number | null) {
   if (percent === null) {
     inFlightItemIds.delete(id);
@@ -266,9 +277,33 @@ export async function sync(): Promise<DrainReport> {
   }
 }
 
+/**
+ * Executes sync with exponential backoff retries for transient network failures.
+ */
+export async function syncWithBackoff(
+  maxRetries = 3,
+  baseMs = 1000,
+  maxMs = 30000,
+): Promise<DrainReport> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await sync();
+    } catch (err) {
+      if (isOffline() || attempt >= maxRetries) {
+        throw err;
+      }
+      attempt++;
+      const delay = calculateExponentialBackoff(attempt - 1, baseMs, maxMs);
+      console.warn(`[Outbox Sync] Intermittent failure (attempt ${attempt}/${maxRetries}). Retrying in ${delay}ms...`, err);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
 export const quietSync = async (): Promise<void> => {
   try {
-    await sync();
+    await syncWithBackoff();
   } catch {
     // Logged in sync state
   }

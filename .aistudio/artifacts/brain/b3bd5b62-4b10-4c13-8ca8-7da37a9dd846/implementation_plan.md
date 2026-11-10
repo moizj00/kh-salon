@@ -1,47 +1,59 @@
-# Implementation Plan: Storefront Plan A (P1-32) Decisions & Documentation
+# Implementation Plan: Cashless Sales Rep Workflow & Territory Performance Dashboard
 
-Implement Plan A (P1-32) of the khsalon.com storefront plan set (`docs/plans/will-be-implemented/2026-11-10-khsalon-storefront-plan-a-decisions.md`), establishing decisions D-51 to D-61, assumption A-23, status board rows P1-32 to P1-38, blockers B-54 to B-61, and context map updates on a dedicated git feature branch.
+This plan updates the **Kiran DMS** system to transition Sales Representatives to a cashless field workflow and provide reps with a territory sales performance dashboard approved by the Office Manager.
 
-## User Intent & Requirements
-- **Target**: Execute Plan A (P1-32) as specified in `docs/plans/will-be-implemented/`.
-- **Branch**: Create and checkout `claude/storefront-p1-32` from `origin/main`.
-- **Docs Only**: No database migration or application code in this task; all changes are documentation, status board, decision log, and activity protocol records.
+---
 
-## Proposed Changes
+## 1. User Intent & Business Requirements
 
-### 1. Git Branch Setup
-- Create and checkout feature branch `claude/storefront-p1-32` from `origin/main`.
+- **Cashless Sales Rep Workflow**: Sales Reps will no longer collect or handle cash payments in the field. Reps focus exclusively on salon visits (with GPS coordinates verification), taking wholesale orders, and providing customer support.
+- **Direct Bank Transfer & Office Payments**: Salons pay for orders via direct bank transfer, mobile banking, or central office deposits. Payment verification is handled strictly by the Office Manager / Owner.
+- **Territory Performance Dashboard**: Reps will have a dedicated dashboard in the Rep View showing:
+  1. Total Territory Sales Volume (PKR)
+  2. Completed Orders Count
+  3. Verified Salon Visit Count
+  4. Estimated & Manager-Approved Commission Payout
+- **Manager Approval Flow**: Commission payouts and territory sales summaries require explicit review and approval by the Office Manager before being finalized.
 
-### 2. Decision Log Updates (`docs/12-decisions-and-open-questions.md`)
-- Record decisions D-51 through D-61 verbatim quoting MJ's explicit instructions from chat (2026-11-10):
-  - D-51: Public shop added to Phase 1 scope (P1-32 to P1-38).
-  - D-52: Public catalogue read access for published SKUs at default price.
-  - D-53: Shopify checkout and payment integration.
-  - D-54: DMS as single source of truth for catalogue master.
-  - D-55: Public brand names (Musk, Lunex, Kemon); KH Enterprises trading name; KH Salon physical salon.
-  - D-56: First-party analytics tracking without external third-party tracking scripts.
-  - D-57: Two buyers (direct consumer and client salon).
-  - D-58: Single default market price; custom per-salon prices shown exclusively inside salon portal.
-  - D-59: Single office review queue handling Regular User and Client Salon orders.
-  - D-60: Automated delivery timeline tracking and repeated owner/manager email reminders.
-  - D-61: Rider delivery for Regular User orders with manager/owner completion marking.
-- Add Assumption A-23 regarding salon client order flow from public product pages.
+---
 
-### 3. Status Board & Blockers (`docs/ACTIVITY.md`)
-- Add rows P1-32 to P1-38 to the status board (all set to NOT STARTED).
-- Add Blockers B-54 through B-61 to the blockers table.
-- Update Blocker B-10 status.
+## 2. Proposed Architecture & Code Changes
 
-### 4. Context Map (`CONTEXT-MAP.md`)
-- Add the eighth context, "storefront", defining its domain vocabulary: visitor, visit, published, default price, storefront event.
+### A. Workspace Preview Applet (`/src`)
 
-### 5. Activity Log (`docs/log/2026-11-10-claude-storefront-decisions.md`)
-- Create a `DECISION` activity log entry following the Kiran DMS Activity protocol.
-- Run `node scripts/activity-log-check.mjs origin/main HEAD` and `pnpm agent:preflight`.
-- Commit changes to branch `claude/storefront-p1-32`.
+1. **Rep View Updates (`src/components/rep-view.tsx`)**:
+   - Remove "Record Cash Collection" form from the Rep Action panel.
+   - Add **Territory Performance Dashboard** tab showing:
+     - Total Sales Volume (PKR) for assigned territory
+     - Completed Orders Count & Visit Count
+     - Manager-Approved Commission Status & Payout Summary
+   - Update Rep Check-In to focus on territory route and sample bag verification without requiring cash float handovers.
 
-## Verification Plan
+2. **Office View Updates (`src/components/office-view.tsx`)**:
+   - Add **Bank Transfer & Deposit Processing** panel for office staff to record and verify salon payments received via bank transfer or office deposit.
+   - Add **Rep Commission & Territory Performance Review** tab allowing managers to review rep sales summaries and approve monthly/weekly commission payouts.
 
-### Automated Checks
-1. Run `pnpm agent:preflight` from repository root.
-2. Run `node scripts/activity-log-check.mjs origin/main HEAD` to verify log protocol compliance.
+3. **Navigation & Navigation Badges (`src/components/navigation.tsx`)**:
+   - Update quick-action badges to reflect cashless workflow and territory metrics.
+
+---
+
+### B. Cloned Repository (`/tmp/kiran-dms`)
+
+1. **Database Migration (`supabase/migrations/20261110000001_cashless_rep_workflow.sql`)**:
+   - Create `public.bank_transfer_receipt` table to store direct salon bank transfer references and deposit receipts.
+   - Create `public.rep_commission_approval` table to track manager-approved territory sales summaries and commission payouts.
+   - Update RPC `app.rep_record_payment` or deprecate direct rep cash collection RPCs in favor of `office_record_bank_transfer()`.
+   - Add `app.rep_territory_dashboard(p_rep_id)` `SECURITY DEFINER` function to return manager-approved sales volume, completed orders, visit count, and approved commission.
+
+2. **Web Application Pages (`apps/web/`)**:
+   - Update Rep Portal pages to display territory metrics instead of cash ledger.
+   - Update Office Portal pages with bank transfer reconciliation and rep commission approval drawer.
+
+---
+
+## 3. Verification Plan
+
+- **Applet Compilation**: Run `compile_applet` and `lint_applet` to verify React UI compilation and TypeScript safety.
+- **Typecheck**: Run `pnpm typecheck` in `/tmp/kiran-dms` across all workspace packages.
+- **Preflight & Activity Log**: Run `node scripts/activity-log-check.mjs origin/main HEAD` and `pnpm agent:preflight` to ensure governance rules H-01 through H-27 are satisfied.

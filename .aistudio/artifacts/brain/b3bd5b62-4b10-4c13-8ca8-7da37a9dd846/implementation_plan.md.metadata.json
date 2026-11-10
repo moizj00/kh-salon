@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for Storefront Plan A (P1-32): Recording decisions D-51 to D-61, updating documentation, status board, blockers, and context vocabulary on feature branch claude/storefront-p1-32.",
-  "updatedAt":  "2026-11-10T16:52:14.167226018Z",
+  "summary":  "Implementation plan for removing field cash collection by Sales Reps, transitioning salon payments to direct bank transfer/office deposit, and adding a manager-approved Territory Performance & Commission Dashboard for Sales Reps.",
+  "updatedAt":  "2026-11-10T19:02:21.884518964Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

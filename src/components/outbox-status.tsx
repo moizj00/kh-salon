@@ -12,7 +12,7 @@ import {
 } from "../lib/outbox";
 import type { OutboxItem } from "../lib/outbox/types";
 import { when } from "../lib/time";
-import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, RefreshCw, Trash2, Wifi, WifiOff } from "lucide-react";
+import { AlertCircle, ChevronDown, ChevronUp, RefreshCw, Trash2, Wifi, WifiOff } from "lucide-react";
 
 export const OutboxStatus: React.FC = () => {
   const [items, setItems] = useState<OutboxItem[]>([]);
@@ -44,6 +44,7 @@ export const OutboxStatus: React.FC = () => {
   const pending = items.filter((i) => i.state === "pending");
   const rejected = items.filter((i) => i.state === "rejected");
   const offline = isOffline();
+  const isSyncing = isDraining || state.transmittingIds.length > 0;
 
   const handleManualSync = async () => {
     setIsDraining(true);
@@ -71,47 +72,56 @@ export const OutboxStatus: React.FC = () => {
   return (
     <div className="w-full bg-white dark:bg-[#211d1b] border-b border-[#e6dfdb] dark:border-[#3a3330] shadow-xs text-xs">
       <div className="max-w-md mx-auto px-4 py-2.5 flex items-center justify-between gap-2">
-        {/* Connection status & quick offline simulator toggle */}
+        {/* Connection & Sync Status Indicator */}
         <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={() => setSimulatedOffline(!state.simulatedOffline)}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium transition-colors ${
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-semibold transition-colors ${
               offline
                 ? "bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200"
+                : isSyncing
+                ? "bg-sky-100 dark:bg-sky-950/60 text-sky-900 dark:text-sky-200"
                 : "bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-300"
             }`}
             title="Click to toggle simulated offline mode for field testing"
           >
             {offline ? (
               <>
-                <WifiOff className="w-3.5 h-3.5" />
+                <WifiOff className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
                 <span>Offline {state.simulatedOffline && "(Simulated)"}</span>
+              </>
+            ) : isSyncing ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-sky-600 dark:text-sky-400" />
+                <span>Syncing...</span>
               </>
             ) : (
               <>
-                <Wifi className="w-3.5 h-3.5" />
+                <Wifi className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
                 <span>Online</span>
               </>
             )}
           </button>
 
-          {/* Pending queue badge */}
+          {/* Pending items waiting to process indicator */}
           {pending.length > 0 && (
-            <span className="font-semibold text-amber-700 dark:text-amber-400 flex items-center gap-1">
-              <span className="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-              Waiting to send ({pending.length})
-            </span>
+            <div className="flex items-center gap-1.5">
+              <span className="inline-flex items-center justify-center px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/80 text-amber-900 dark:text-amber-200 font-bold text-[11px] border border-amber-300/60 dark:border-amber-800/60">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse mr-1" />
+                {pending.length} {pending.length === 1 ? "item" : "items"} waiting
+              </span>
+            </div>
           )}
 
-          {pending.length === 0 && rejected.length === 0 && state.lastSyncAt && (
+          {pending.length === 0 && rejected.length === 0 && state.lastSyncAt && !isSyncing && (
             <span className="text-[#6b625e] dark:text-[#a59b96] hidden sm:inline">
               Synced {when(state.lastSyncAt)}
             </span>
           )}
         </div>
 
-        {/* Action buttons */}
+        {/* Action buttons & Attention toggle */}
         <div className="flex items-center gap-2">
           {rejected.length > 0 && (
             <button
@@ -133,10 +143,42 @@ export const OutboxStatus: React.FC = () => {
             title="Send all queued actions now"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isDraining ? "animate-spin" : ""}`} />
-            <span>Sync</span>
+            <span>{isSyncing ? "Syncing..." : "Sync"}</span>
           </button>
         </div>
       </div>
+
+      {/* Transmitting Progress Bar Banner */}
+      {state.transmittingIds.length > 0 && (
+        <div className="bg-sky-50 dark:bg-sky-950/40 border-t border-sky-200 dark:border-sky-900/40 px-4 py-2">
+          <div className="max-w-md mx-auto space-y-1.5">
+            <div className="flex items-center justify-between text-[11px] font-semibold text-sky-900 dark:text-sky-200">
+              <span className="flex items-center gap-1.5">
+                <RefreshCw className="w-3 h-3 animate-spin text-sky-600 dark:text-sky-400" />
+                Transmitting action to server ({state.transmittingIds.length} active)
+              </span>
+              <span>
+                {Math.round(
+                  Object.values(state.activeProgress).reduce((a, b) => a + b, 0) /
+                    Math.max(1, Object.keys(state.activeProgress).length)
+                )}
+                %
+              </span>
+            </div>
+            <div className="w-full h-1.5 bg-sky-200 dark:bg-sky-900/60 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-sky-600 dark:bg-sky-400 transition-all duration-300 ease-out"
+                style={{
+                  width: `${Math.round(
+                    Object.values(state.activeProgress).reduce((a, b) => a + b, 0) /
+                      Math.max(1, Object.keys(state.activeProgress).length)
+                  )}%`,
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Expandable Needs Attention & Queue Details Drawer */}
       {expanded && (
@@ -238,7 +280,7 @@ export const OutboxStatus: React.FC = () => {
 
       {/* Offline banner notification when offline */}
       {offline && (
-        <div className="bg-amber-500/10 dark:bg-amber-950/40 border-t border-amber-300/40 px-4 py-1.5 text-center text-amber-900 dark:text-amber-200">
+        <div className="bg-amber-500/10 dark:bg-amber-950/40 border-t border-amber-300/40 px-4 py-1.5 text-center text-amber-900 dark:text-amber-200 font-medium">
           Field Mode: Working offline. All visits, counts, and payments are stored securely on this phone.
         </div>
       )}
