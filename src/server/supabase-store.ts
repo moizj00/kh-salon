@@ -4,6 +4,7 @@ import type { OutboxFn } from "../lib/outbox/types.ts";
 import {
   RpcError,
   type BootstrapPayload,
+  type BulkSalonInput,
   type CreateShopOrderInput,
   type DeliveryOrderFull,
   type KiranRepository,
@@ -692,5 +693,29 @@ export class SupabaseKiranRepository implements KiranRepository {
         return { ok: true, message: `Shop order updated to ${input.status}.` };
       }
     }
+  }
+
+  async bulkImportSalons(salons: BulkSalonInput[], createdBy: string): Promise<number> {
+    const rows = salons
+      .filter((s) => s.name?.trim())
+      .map((s, idx) => ({
+        id: `sal-imp-${Date.now()}-${idx + 1}`,
+        name: s.name.trim(),
+        area: (s.area || "Karachi").trim(),
+        address: `${(s.area || "Karachi").trim()}, Karachi`,
+        phone: (s.phone || "0300-0000000").trim(),
+        contact_person: (s.contact || "Owner").trim(),
+        stage: "prospect",
+        approval_status: "approved",
+        outstanding_balance: 0,
+        credit_limit: Number(s.creditLimit) || 25000,
+        created_by: createdBy,
+      }));
+
+    if (rows.length === 0) return 0;
+
+    const { error } = await this.client.from("salons").upsert(rows, { onConflict: "name" });
+    if (error) throw this.wrapDbError(error);
+    return rows.length;
   }
 }

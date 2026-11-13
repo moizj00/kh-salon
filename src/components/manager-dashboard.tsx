@@ -4,6 +4,7 @@ import {
   Check,
   ClipboardCheck,
   Coins,
+  FileSpreadsheet,
   Package,
   RefreshCw,
   Search,
@@ -14,6 +15,7 @@ import {
 import { fetchManagerOverview, submitManagerApproval } from "../lib/api";
 import { when } from "../lib/time";
 import type { ManagerApprovalAction, ManagerOverviewPayload } from "../server/types";
+import { SalonBulkImportModal } from "./salon-bulk-import-modal";
 
 interface ManagerDashboardProps {
   showToast: (msg: string, type?: "ok" | "info" | "warn") => void;
@@ -32,6 +34,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [salonQuery, setSalonQuery] = useState("");
+  const [showBulkImport, setShowBulkImport] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -128,14 +131,25 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={() => void load()}
-          className="px-3.5 py-2 rounded-xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold flex items-center gap-1.5 hover:border-[#7a2e4a]"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-          <span>Refresh Ledger</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowBulkImport(true)}
+            className="px-3.5 py-2 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs hover:bg-[#66243d]"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5" />
+            <span>Import Salons (Excel)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="px-3.5 py-2 rounded-xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold flex items-center gap-1.5 hover:border-[#7a2e4a]"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+            <span>Refresh Ledger</span>
+          </button>
+        </div>
       </div>
 
       {/* KPI Strip */}
@@ -431,15 +445,25 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
           <div className="lg:col-span-2 p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="font-bold text-sm">Salon Credit & Receivables</h3>
-              <div className="relative w-full sm:w-60">
-                <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-[#6b625e]" />
-                <input
-                  type="text"
-                  placeholder="Filter salons..."
-                  value={salonQuery}
-                  onChange={(e) => setSalonQuery(e.target.value)}
-                  className="w-full pl-8 pr-3 py-1.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
-                />
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <div className="relative w-full sm:w-52">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-[#6b625e]" />
+                  <input
+                    type="text"
+                    placeholder="Filter salons..."
+                    value={salonQuery}
+                    onChange={(e) => setSalonQuery(e.target.value)}
+                    className="w-full pl-8 pr-3 py-1.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowBulkImport(true)}
+                  className="px-3 py-1.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-black/5 dark:bg-white/5 text-xs font-semibold hover:border-[#7a2e4a] flex items-center gap-1 shrink-0"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-[#7a2e4a] dark:text-[#d77a9c]" />
+                  <span>Bulk Import</span>
+                </button>
               </div>
             </div>
 
@@ -693,6 +717,16 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
           </div>
         </div>
       )}
+
+      <SalonBulkImportModal
+        isOpen={showBulkImport}
+        onClose={() => setShowBulkImport(false)}
+        onSuccess={() => {
+          void load();
+          onApprovedChange?.();
+        }}
+        showToast={showToast}
+      />
     </div>
   );
 };

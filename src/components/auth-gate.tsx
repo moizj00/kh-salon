@@ -125,35 +125,37 @@ export const AuthGate: React.FC<AuthGateProps> = ({ authConfigured, onAuthentica
             <span>{loading ? "Connecting..." : "Continue with Google"}</span>
           </button>
 
-          {!authConfigured && (
-            <div className="pt-3 border-t border-[#e6dfdb] dark:border-[#3a3330] space-y-2.5">
-              <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                Google OAuth activates automatically once Supabase environment variables are added. Use a local workspace profile to test all backend features now:
-              </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  disabled={loading}
-                  onClick={() => handleDemoSignIn("rep")}
-                  className="h-11 px-3 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413] text-xs font-semibold flex items-center justify-center gap-2 hover:border-[#7a2e4a] transition-colors"
-                >
-                  <UserCheck className="w-4 h-4 text-[#7a2e4a] dark:text-[#d77a9c]" />
-                  <span>Field Rep Workspace</span>
-                  <ArrowRight className="w-3.5 h-3.5 text-[#6b625e]" />
-                </button>
-                <button
-                  type="button"
-                  disabled={loading}
-                  onClick={() => handleDemoSignIn("manager")}
-                  className="h-11 px-3 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413] text-xs font-semibold flex items-center justify-center gap-2 hover:border-[#7a2e4a] transition-colors"
-                >
-                  <Briefcase className="w-4 h-4 text-[#7a2e4a] dark:text-[#d77a9c]" />
-                  <span>Office Manager</span>
-                  <ArrowRight className="w-3.5 h-3.5 text-[#6b625e]" />
-                </button>
-              </div>
+          <div className="pt-3 border-t border-[#e6dfdb] dark:border-[#3a3330] space-y-2.5">
+            <div className="flex items-center gap-2">
+              <div className="h-px bg-[#e6dfdb] dark:bg-[#3a3330] flex-1" />
+              <span className="text-[11px] text-[#6b625e] dark:text-[#a59b96] uppercase font-medium tracking-wider">
+                Or quick test sign-in
+              </span>
+              <div className="h-px bg-[#e6dfdb] dark:bg-[#3a3330] flex-1" />
             </div>
-          )}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => handleDemoSignIn("rep")}
+                className="h-11 px-3 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413] text-xs font-semibold flex items-center justify-center gap-2 hover:border-[#7a2e4a] transition-colors"
+              >
+                <UserCheck className="w-4 h-4 text-[#7a2e4a] dark:text-[#d77a9c]" />
+                <span>Field Rep Workspace</span>
+                <ArrowRight className="w-3.5 h-3.5 text-[#6b625e]" />
+              </button>
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => handleDemoSignIn("manager")}
+                className="h-11 px-3 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413] text-xs font-semibold flex items-center justify-center gap-2 hover:border-[#7a2e4a] transition-colors"
+              >
+                <Briefcase className="w-4 h-4 text-[#7a2e4a] dark:text-[#d77a9c]" />
+                <span>Office Manager</span>
+                <ArrowRight className="w-3.5 h-3.5 text-[#6b625e]" />
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

@@ -37,6 +37,21 @@ export type OutboxItem = {
   error: string | null;
 };
 
+export type AttemptResult = "sent" | "offline" | "auth" | "rejected";
+
+export type SyncAttempt = {
+  id: string;
+  userId: string;
+  at: number;
+  fn: OutboxFn;
+  label: string;
+  result: AttemptResult;
+  message: string | null;
+  durationMs: number;
+};
+
+export const SYNC_HISTORY_LIMIT = 50;
+
 export type OutboxPatch = Partial<Pick<OutboxItem, "args" | "state" | "attempts" | "nextAttemptAt" | "error">>;
 
 export interface OutboxStore {
@@ -44,5 +59,7 @@ export interface OutboxStore {
   list(userId: string): Promise<OutboxItem[]>;
   update(id: string, patch: OutboxPatch): Promise<void>;
   remove(id: string): Promise<void>;
+  record(attempt: SyncAttempt): Promise<void>;
+  history(userId: string): Promise<SyncAttempt[]>;
   clear(): Promise<void>;
 }

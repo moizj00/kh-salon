@@ -1,10 +1,11 @@
 import { newKey, openJson, sealJson } from "./crypto";
-import type { OutboxItem, OutboxPatch, OutboxStore } from "./types";
+import { type OutboxItem, type OutboxPatch, type OutboxStore, SYNC_HISTORY_LIMIT, type SyncAttempt } from "./types";
 
 const DB_NAME = "kiran-outbox";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const ITEMS = "items";
 const KEYS = "keys";
+const HISTORY = "history";
 const BY_ID = "id";
 const BY_USER = "userId";
 
@@ -15,6 +16,8 @@ const UPDATE_LOST = "The waiting list changed while it was being updated. Try ag
 
 type Sealed = Pick<OutboxItem, "args" | "error" | "label">;
 type StoredItem = Omit<OutboxItem, "args" | "error" | "label"> & { sealed: string };
+type SealedAttempt = Pick<SyncAttempt, "label" | "message">;
+type StoredAttempt = Omit<SyncAttempt, "label" | "message"> & { seq?: number; sealed: string };
 
 const settled = <T>(request: IDBRequest<T>): Promise<T> =>
   new Promise((resolve, reject) => {
@@ -39,12 +42,18 @@ const openDb = (): Promise<IDBDatabase> =>
       return;
     }
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result;
-      const items = db.createObjectStore(ITEMS, { keyPath: "seq", autoIncrement: true });
-      items.createIndex(BY_ID, "id", { unique: true });
-      items.createIndex(BY_USER, "userId");
-      db.createObjectStore(KEYS);
+      if (event.oldVersion < 1) {
+        const items = db.createObjectStore(ITEMS, { keyPath: "seq", autoIncrement: true });
+        items.createIndex(BY_ID, "id", { unique: true });
+        items.createIndex(BY_USER, "userId");
+        db.createObjectStore(KEYS);
+      }
+      if (event.oldVersion < 2) {
+        const history = db.createObjectStore(HISTORY, { keyPath: "seq", autoIncrement: true });
+        history.createIndex(BY_USER, "userId");
+      }
     };
     request.onsuccess = () => {
       const db = request.result;
@@ -146,11 +155,43 @@ const remove = async (id: string): Promise<void> => {
   await done;
 };
 
+const record = async (attempt: SyncAttempt): Promise<void> => {
+  const db = await database();
+  const { label, message, ...plain } = attempt;
+  const content: SealedAttempt = { label, message };
+  const stored: StoredAttempt = { ...plain, sealed: await sealJson(await keyFor(db, attempt.userId), content) };
+  const tx = db.transaction(HISTORY, "readwrite");
+  const done = committed(tx);
+  const historyStore = tx.objectStore(HISTORY);
+  historyStore.add(stored);
+  const keys: IDBValidKey[] = await settled(historyStore.index(BY_USER).getAllKeys(attempt.userId));
+  keys.slice(0, Math.max(0, keys.length - SYNC_HISTORY_LIMIT)).forEach((key) => {
+    historyStore.delete(key);
+  });
+  await done;
+};
+
+const history = async (userId: string): Promise<SyncAttempt[]> => {
+  const db = await database();
+  const records: StoredAttempt[] = await settled(db.transaction(HISTORY).objectStore(HISTORY).index(BY_USER).getAll(userId));
+  const attempts = await Promise.all(
+    records.map(async ({ seq, sealed, ...plain }) => ({
+      seq: seq ?? 0,
+      attempt: {
+        ...plain,
+        ...(await openJson<SealedAttempt>(await keyFor(db, userId), sealed)),
+      } as SyncAttempt,
+    })),
+  );
+  return attempts.sort((a, b) => b.seq - a.seq).map((entry) => entry.attempt);
+};
+
 const clear = async (): Promise<void> => {
   const db = await database();
-  const tx = db.transaction([ITEMS, KEYS], "readwrite");
+  const tx = db.transaction([ITEMS, KEYS, HISTORY], "readwrite");
   const done = committed(tx);
   tx.objectStore(ITEMS).clear();
+  tx.objectStore(HISTORY).clear();
   tx.objectStore(KEYS).clear();
   keyCache.clear();
   await done;
@@ -158,5 +199,5 @@ const clear = async (): Promise<void> => {
 
 export async function openIdbStore(): Promise<OutboxStore> {
   await database();
-  return { add, list, update: (id, patch) => applyPatch(id, patch, UPDATE_TRIES), remove, clear };
+  return { add, list, update: (id, patch) => applyPatch(id, patch, UPDATE_TRIES), remove, record, history, clear };
 }

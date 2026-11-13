@@ -26,10 +26,11 @@ import {
   startSync,
   submit,
   subscribe,
+  syncHistory,
   syncState,
   wipeLocalData,
 } from "./lib/outbox";
-import type { OutboxItem } from "./lib/outbox/types";
+import type { OutboxItem, SyncAttempt } from "./lib/outbox/types";
 import { cachedRows } from "./lib/cache";
 import { registerServiceWorker } from "./lib/register-sw";
 import { when } from "./lib/time";
@@ -54,9 +55,11 @@ import {
   Briefcase,
   CalendarCheck,
   Check,
+  CheckCircle2,
   Clock,
   Coins,
   FileText,
+  History,
   LogOut,
   MapPin,
   Package,
@@ -65,6 +68,7 @@ import {
   Search,
   ShieldCheck,
   UserCheck,
+  WifiOff,
   X,
 } from "lucide-react";
 
@@ -85,6 +89,7 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState<TabKey>("today");
   const [items, setItems] = useState<OutboxItem[]>([]);
+  const [historyItems, setHistoryItems] = useState<SyncAttempt[]>([]);
   const [outboxState, setOutboxState] = useState(syncState());
   const [salons, setSalons] = useState<SalonWithApproval[]>(INITIAL_SALONS);
   const [route, setRoute] = useState<RouteStop[]>(INITIAL_ROUTE);
@@ -213,14 +218,19 @@ export default function App() {
     const stopSync = startSync();
 
     const refreshOutbox = async () => {
-      const all = await listItems();
-      const nextState = syncState();
-      setItems(all);
-      setOutboxState(nextState);
+      try {
+        const [all, hist] = await Promise.all([listItems(), syncHistory()]);
+        const nextState = syncState();
+        setItems(all);
+        setHistoryItems(hist);
+        setOutboxState(nextState);
 
-      if (nextState.lastSyncAt && nextState.lastSyncAt !== lastSyncRef.current) {
-        lastSyncRef.current = nextState.lastSyncAt;
-        void refreshBootstrap();
+        if (nextState.lastSyncAt && nextState.lastSyncAt !== lastSyncRef.current) {
+          lastSyncRef.current = nextState.lastSyncAt;
+          void refreshBootstrap();
+        }
+      } catch (err) {
+        console.error("Outbox refresh failed", err);
       }
     };
 
@@ -1305,6 +1315,7 @@ export default function App() {
                         onClick={async () => {
                           await wipeLocalData();
                           setItems([]);
+                          setHistoryItems([]);
                           setConfirmWipe(false);
                           showToast("Outbox queue wiped.", "warn");
                         }}
@@ -1495,6 +1506,64 @@ export default function App() {
                         </div>
                       </div>
                     ))
+                  )}
+                </div>
+
+                {/* Transmission History */}
+                <div className="space-y-2 pt-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 font-semibold text-xs text-[#6b625e] dark:text-[#a59b96]">
+                      <History className="w-3.5 h-3.5" />
+                      <span>Recent Transmission History ({historyItems.length})</span>
+                    </div>
+                    <span className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                      Last 50 transmission attempts
+                    </span>
+                  </div>
+
+                  {historyItems.length === 0 ? (
+                    <div className="p-6 rounded-2xl border border-dashed border-[#e6dfdb] dark:border-[#3a3330] text-center text-xs text-[#6b625e] dark:text-[#a59b96]">
+                      No transmission attempts recorded yet. Queued actions record their latency, server acknowledgment, and error states here.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {historyItems.map((attempt) => (
+                        <div
+                          key={attempt.id}
+                          className="p-3 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs text-xs space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="font-bold text-[#1d1a19] dark:text-[#f2eeec] truncate">
+                              {attempt.label}
+                            </div>
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                                attempt.result === "sent"
+                                  ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
+                                  : attempt.result === "offline"
+                                  ? "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
+                                  : attempt.result === "auth"
+                                  ? "bg-purple-100 text-purple-800 dark:bg-purple-950/60 dark:text-purple-300"
+                                  : "bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300"
+                              }`}
+                            >
+                              {attempt.result} · {attempt.durationMs}ms
+                            </span>
+                          </div>
+
+                          <div className="flex items-center justify-between text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                            <span className="font-mono">RPC: {attempt.fn}</span>
+                            <span>{when(new Date(attempt.at).toISOString())}</span>
+                          </div>
+
+                          {attempt.message && (
+                            <div className="p-2 rounded-lg bg-black/5 dark:bg-white/5 font-mono text-[11px] text-[#6b625e] dark:text-[#a59b96] break-all">
+                              {attempt.message}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
               </div>

@@ -2,7 +2,9 @@ import { apiFetch } from "../api";
 import { type DrainReport, drain } from "./drain";
 import { enqueue, retry } from "./queue";
 import { openIdbStore } from "./store-idb";
-import type { Dependency, OutboxFn, OutboxItem, OutboxStore } from "./types";
+import type { Dependency, OutboxFn, OutboxItem, OutboxStore, SyncAttempt } from "./types";
+
+export type { SyncAttempt };
 
 const USER_KEY = "kiran.outbox.user";
 const DEFAULT_USER_ID = "rep-karachi-pilot-01";
@@ -292,6 +294,11 @@ export async function submit(input: SubmitInput): Promise<"sent" | "queued" | "r
 export async function listItems(): Promise<OutboxItem[]> {
   const store = await openIdbStore();
   return store.list(await captureUserId());
+}
+
+export async function syncHistory(): Promise<SyncAttempt[]> {
+  const store = await openIdbStore();
+  return store.history(await captureUserId());
 }
 
 export async function retryItem(id: string): Promise<void> {

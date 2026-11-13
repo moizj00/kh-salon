@@ -165,6 +165,14 @@ export class RpcError extends Error {
   }
 }
 
+export interface BulkSalonInput {
+  name: string;
+  area?: string;
+  phone?: string;
+  contact?: string;
+  creditLimit?: number;
+}
+
 export interface KiranRepository {
   getBootstrap(user: UserProfile): Promise<BootstrapPayload>;
   executeRpc(user: UserProfile, fn: OutboxFn, args: Record<string, unknown>): Promise<Record<string, unknown>>;
@@ -173,4 +181,5 @@ export interface KiranRepository {
   listShopOrders(): Promise<PublicShopOrder[]>;
   getManagerOverview(user: UserProfile): Promise<ManagerOverviewPayload>;
   handleManagerApproval(input: ManagerApprovalAction): Promise<{ ok: true; message: string }>;
+  bulkImportSalons(salons: BulkSalonInput[], createdBy: string): Promise<number>;
 }

@@ -10,6 +10,7 @@ import type { OutboxFn } from "../lib/outbox/types.ts";
 import {
   RpcError,
   type BootstrapPayload,
+  type BulkSalonInput,
   type CreateShopOrderInput,
   type DeliveryOrderFull,
   type KiranRepository,
@@ -608,5 +609,45 @@ export class MemoryKiranRepository implements KiranRepository {
         return { ok: true, message: `Order ${order.orderNumber} updated to ${input.status}.` };
       }
     }
+  }
+
+  async bulkImportSalons(salons: BulkSalonInput[], _createdBy: string): Promise<number> {
+    const at = new Date().toISOString();
+    let imported = 0;
+    for (const item of salons) {
+      const name = (item.name || "").trim();
+      if (!name) continue;
+      const area = (item.area || "Karachi").trim();
+      const phone = (item.phone || "0300-0000000").trim();
+      const contact = (item.contact || "Owner").trim();
+      const creditLimit = Number(item.creditLimit) || 25000;
+      const id = `sal-imp-${Date.now()}-${imported + 1}`;
+
+      const existing = this.salons.find((s) => s.name.toLowerCase() === name.toLowerCase());
+      if (existing) {
+        existing.area = area;
+        existing.phone = phone;
+        existing.contact_person = contact;
+        existing.credit_limit = creditLimit;
+      } else {
+        this.salons.push({
+          id,
+          name,
+          area,
+          address: `${area}, Karachi`,
+          phone,
+          contact_person: contact,
+          stage: "prospect",
+          approval_status: "approved",
+          outstanding_balance: 0,
+          credit_limit: creditLimit,
+          last_visited_at: at,
+          notes_count: 0,
+          open_cards_count: 0,
+        });
+      }
+      imported++;
+    }
+    return imported;
   }
 }

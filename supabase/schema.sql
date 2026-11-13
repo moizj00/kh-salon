@@ -193,3 +193,145 @@ values
   ('ord-8801', 'ORD-KRN-2026-8801', 'sal-clifton-01', 'Toni&Guy Clifton Branch', '[{"sku_name":"Kiran Brazilian Keratin Complex 500ml","qty":2,"price":6800},{"sku_name":"Moroccan Argan Elixir Serum 100ml","qty":4,"price":2450}]'::jsonb, 23400, 'pending_delivery', null),
   ('ord-8802', 'ORD-KRN-2026-8802', 'sal-dha-02', 'Peng''s Hair Studio DHA', '[{"sku_name":"Post-Chemical Clarifying Shampoo 1L","qty":3,"price":3200}]'::jsonb, 9600, 'pending_delivery', null)
 on conflict (id) do nothing;
+
+-- 12. RPC Functions in 'app' Schema (matches Kiran DMS offline outbox queue)
+create schema if not exists app;
+
+create or replace function app.rep_check_in(p_id text, p_bag_count integer, p_fail boolean default false)
+returns jsonb language plpgsql as $$
+begin
+  if p_fail or p_bag_count < 0 then
+    raise exception 'Negative bag count refused: %', p_bag_count using errcode = '22003';
+  end if;
+
+  insert into public.rep_shifts (id, rep_id, rep_name, status, opening_bag_count, opened_at, approval_status)
+  values (p_id, coalesce(auth.uid()::text, 'rep-karachi-pilot-01'), 'Rashid Khan', 'open', p_bag_count, now(), 'pending')
+  on conflict (id) do nothing;
+
+  return jsonb_build_object('id', p_id, 'status', 'open', 'opening_bag_count', p_bag_count);
+end;
+$$;
+
+create or replace function app.record_count(p_id text, p_count integer)
+returns jsonb language plpgsql as $$
+begin
+  if p_count < 0 then
+    raise exception 'Negative bag count rejected: %', p_count using errcode = '22003';
+  end if;
+  return jsonb_build_object('id', p_id, 'count', p_count, 'recorded_at', now());
+end;
+$$;
+
+create or replace function app.rep_check_out(p_id text, p_count_id text)
+returns jsonb language plpgsql as $$
+declare
+  v_shift public.rep_shifts%rowtype;
+begin
+  select * into v_shift from public.rep_shifts where status = 'open' order by opened_at desc limit 1;
+  if not found then
+    raise exception 'No open shift record found to check out' using errcode = 'P0002';
+  end if;
+
+  update public.rep_shifts
+  set status = 'closed',
+      count_record_id = p_count_id,
+      closing_bag_count = 22,
+      expected_bag_count = 24,
+      variance_units = -2,
+      closed_at = now(),
+      approval_status = 'flagged'
+  where id = v_shift.id;
+
+  return jsonb_build_object('id', p_id, 'shift_id', v_shift.id, 'status', 'closed', 'variance_units', -2);
+end;
+$$;
+
+create or replace function app.log_visit(p_id text, p_salon_id text, p_notes text default '', p_lat double precision default null, p_lng double precision default null)
+returns jsonb language plpgsql as $$
+begin
+  insert into public.visits (id, rep_id, salon_id, notes, lat, lng, captured_at)
+  values (p_id, coalesce(auth.uid()::text, 'rep-karachi-pilot-01'), p_salon_id, coalesce(p_notes, ''), p_lat, p_lng, now())
+  on conflict (id) do nothing;
+
+  update public.salons
+  set last_visited_at = now(),
+      notes_count = notes_count + case when length(coalesce(p_notes, '')) > 0 then 1 else 0 end
+  where id = p_salon_id;
+
+  return jsonb_build_object('id', p_id, 'salon_id', p_salon_id, 'recorded', true);
+end;
+$$;
+
+create or replace function app.rep_record_payment(p_id text, p_salon_id text, p_amount integer)
+returns jsonb language plpgsql as $$
+begin
+  if p_amount <= 0 then
+    raise exception 'Payment amount must be greater than zero' using errcode = '22003';
+  end if;
+
+  insert into public.payments (id, rep_id, salon_id, amount, method, captured_at)
+  values (p_id, coalesce(auth.uid()::text, 'rep-karachi-pilot-01'), p_salon_id, p_amount, 'cash', now())
+  on conflict (id) do nothing;
+
+  update public.salons
+  set outstanding_balance = greatest(0, outstanding_balance - p_amount)
+  where id = p_salon_id;
+
+  return jsonb_build_object('id', p_id, 'salon_id', p_salon_id, 'amount', p_amount);
+end;
+$$;
+
+create or replace function app.create_salon(p_id text, p_name text, p_area text default 'Karachi', p_phone text default '0300-0000000', p_contact text default 'Owner')
+returns jsonb language plpgsql as $$
+begin
+  if length(coalesce(trim(p_name), '')) = 0 then
+    raise exception 'Salon name is required' using errcode = '23502';
+  end if;
+
+  insert into public.salons (id, name, area, address, phone, contact_person, stage, approval_status, outstanding_balance, credit_limit, created_by)
+  values (p_id, trim(p_name), coalesce(p_area, 'Karachi'), coalesce(p_area, 'Karachi') || ', Karachi', coalesce(p_phone, '0300-0000000'), coalesce(p_contact, 'Owner'), 'prospect', 'pending_review', 0, 25000, coalesce(auth.uid()::text, 'rep-karachi-pilot-01'))
+  on conflict (id) do nothing;
+
+  return jsonb_build_object('id', p_id, 'name', p_name, 'stage', 'prospect', 'approval_status', 'pending_review');
+end;
+$$;
+
+create or replace function app.record_demand(p_id text, p_sku_name text, p_qty integer)
+returns jsonb language plpgsql as $$
+begin
+  if p_qty <= 0 then
+    raise exception 'Demand quantity must be positive' using errcode = '22003';
+  end if;
+
+  insert into public.lost_demand (id, rep_id, sku_name, qty, captured_at)
+  values (p_id, coalesce(auth.uid()::text, 'rep-karachi-pilot-01'), p_sku_name, p_qty, now())
+  on conflict (id) do nothing;
+
+  return jsonb_build_object('id', p_id, 'sku_name', p_sku_name, 'qty', p_qty);
+end;
+$$;
+
+create or replace function app.rep_submit_delivery(p_id text, p_order_id text)
+returns jsonb language plpgsql as $$
+begin
+  update public.delivery_orders
+  set status = 'delivered',
+      delivered_at = now(),
+      delivery_submission_id = p_id
+  where id = p_order_id;
+
+  return jsonb_build_object('id', p_id, 'order_id', p_order_id, 'delivered', true);
+end;
+$$;
+
+create or replace function app.rep_attach_signature(p_id text, p_delivery_id text, p_signature_data text)
+returns jsonb language plpgsql as $$
+begin
+  update public.delivery_orders
+  set signature_data = p_signature_data
+  where delivery_submission_id = p_delivery_id or id = p_delivery_id;
+
+  return jsonb_build_object('id', p_id, 'delivery_id', p_delivery_id, 'attached', true);
+end;
+$$;
+

@@ -137,3 +137,33 @@ test("public shop order creation and manager approval workflows", async () => {
   assert.equal(overview.pendingOrderCards.length, 0);
   assert.equal(overview.deliveryOrders.length, 3);
 });
+
+test("bulk salon import parses and registers salon records with custom credit limits", async () => {
+  const repo = new MemoryKiranRepository();
+  const count = await repo.bulkImportSalons(
+    [
+      {
+        name: "Luxe Beauty Bar",
+        area: "DHA Phase 5",
+        phone: "0301-8899001",
+        contact: "Zara Ahmed",
+        creditLimit: 60000,
+      },
+      {
+        name: "Classic Cut Barbershop",
+        area: "Gulshan Block 10",
+        phone: "0322-1144778",
+        contact: "Kashif Ali",
+        creditLimit: 30000,
+      },
+    ],
+    repUser.id,
+  );
+
+  assert.equal(count, 2);
+  const overview = await repo.getManagerOverview(repUser);
+  const luxe = overview.salons.find((s) => s.name === "Luxe Beauty Bar");
+  assert.ok(luxe);
+  assert.equal(luxe.area, "DHA Phase 5");
+  assert.equal(luxe.credit_limit, 60000);
+});

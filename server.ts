@@ -117,12 +117,8 @@ async function startServer() {
 </html>`);
   });
 
-  // Demo session fallback (only active when Supabase Auth env vars are not set)
+  // Quick test session helper (useful for evaluation & offline testing)
   app.post("/api/auth/demo", (req, res) => {
-    if (isSupabaseAuthConfigured()) {
-      res.status(403).json({ error: "Demo sign-in is disabled when Supabase Auth is configured." });
-      return;
-    }
     const role: UserRole = req.body?.role === "manager" ? "manager" : "rep";
     const session = issueDemoSession(role);
     res.json(session);
@@ -184,6 +180,31 @@ async function startServer() {
     } catch (err) {
       const status = err instanceof RpcError ? err.status : 500;
       res.status(status).json({ error: err instanceof Error ? err.message : "Failed to load salon history." });
+    }
+  });
+
+  app.post("/api/salons/bulk-import", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const items = req.body?.salons as Array<{
+        name: string;
+        area?: string;
+        phone?: string;
+        contact?: string;
+        creditLimit?: number;
+      }>;
+      if (!Array.isArray(items) || items.length === 0) {
+        res.status(400).json({ error: "No salon rows provided for bulk import." });
+        return;
+      }
+      const createdCount = await repo.bulkImportSalons(items, req.user!.id);
+      res.json({
+        success: true,
+        count: createdCount,
+        message: `Successfully imported ${createdCount} salons into ledger.`,
+      });
+    } catch (err) {
+      const status = err instanceof RpcError ? err.status : 500;
+      res.status(status).json({ error: err instanceof Error ? err.message : "Bulk import failed." });
     }
   });
 

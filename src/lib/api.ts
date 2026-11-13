@@ -113,3 +113,12 @@ export async function submitManagerApproval(
     body: JSON.stringify(action),
   });
 }
+
+export async function bulkImportSalonsApi(
+  salons: Array<{ name: string; area?: string; phone?: string; contact?: string; creditLimit?: number }>,
+): Promise<{ success: boolean; count: number; message: string }> {
+  return apiFetch("/api/salons/bulk-import", {
+    method: "POST",
+    body: JSON.stringify({ salons }),
+  });
+}

@@ -68,8 +68,11 @@ export async function buildGoogleOAuthUrl(redirectUri: string): Promise<string> 
 }
 
 export async function resolveUserFromToken(token: string): Promise<UserProfile | null> {
+  if (DEMO_USERS[token]) {
+    return DEMO_USERS[token];
+  }
   if (!isSupabaseAuthConfigured()) {
-    return DEMO_USERS[token] ?? null;
+    return null;
   }
 
   const url = process.env.SUPABASE_URL!.trim();

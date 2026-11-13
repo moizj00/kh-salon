@@ -1,4 +1,4 @@
-import type { OutboxItem, OutboxPatch, OutboxStore } from "./types";
+import type { OutboxItem, OutboxPatch, OutboxStore, SyncAttempt } from "./types";
 
 export type EnqueueInput = Omit<OutboxItem, "seq" | "state" | "attempts" | "nextAttemptAt" | "error">;
 
@@ -33,8 +33,27 @@ export class MemoryStore implements OutboxStore {
     return Promise.resolve();
   }
 
+  private attempts: SyncAttempt[] = [];
+
+  record(attempt: SyncAttempt): Promise<void> {
+    this.attempts.push({ ...attempt });
+    const mine = this.attempts.filter((a) => a.userId === attempt.userId);
+    const surplus = mine.length - 50;
+    if (surplus > 0) {
+      const drop = new Set(mine.slice(0, surplus));
+      this.attempts = this.attempts.filter((other) => !drop.has(other));
+    }
+    return Promise.resolve();
+  }
+
+  history(userId: string): Promise<SyncAttempt[]> {
+    const mine = this.attempts.filter((a) => a.userId === userId);
+    return Promise.resolve(mine.slice().reverse().map((a) => ({ ...a })));
+  }
+
   clear(): Promise<void> {
     this.items.clear();
+    this.attempts = [];
     return Promise.resolve();
   }
 }
