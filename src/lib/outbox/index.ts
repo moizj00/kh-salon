@@ -1,3 +1,4 @@
+import { apiFetch } from "../api";
 import { type DrainReport, drain } from "./drain";
 import { enqueue, retry } from "./queue";
 import { openIdbStore } from "./store-idb";
@@ -52,12 +53,6 @@ const local: {
   channel: null,
 };
 
-/**
- * Calculates exponential backoff delay in milliseconds for retrying failed sync operations.
- * @param attempts Zero-indexed attempt number (0, 1, 2...)
- * @param baseMs Base delay in milliseconds (default 1000ms)
- * @param maxMs Maximum delay cap in milliseconds (default 30000ms)
- */
 export function calculateExponentialBackoff(attempts: number, baseMs = 1000, maxMs = 30000): number {
   const delay = baseMs * Math.pow(2, Math.max(0, attempts));
   return Math.min(delay, maxMs);
@@ -149,91 +144,36 @@ export function setSessionUserId(id: string) {
   }
 }
 
-// In-app mock execution handler when live DB is offline or for simulated testing
-const mockServerDispatch = async (fn: OutboxFn, args: Record<string, unknown>, itemId?: string): Promise<unknown> => {
+// Real backend RPC dispatcher (replaces in-browser mock)
+const serverDispatch = async (fn: OutboxFn, args: Record<string, unknown>, itemId?: string): Promise<unknown> => {
   const id = itemId || (args.p_id as string) || (args.id as string);
-
-  if (id) {
-    setItemProgress(id, 15);
-  }
-
-  await new Promise((r) => setTimeout(r, 200));
-
-  if (id && inFlightItemIds.has(id)) {
-    setItemProgress(id, 45);
-  }
+  if (id) setItemProgress(id, 25);
 
   if (isOffline()) {
     if (id) setItemProgress(id, null);
     throw new Error("Network unreachable (offline)");
   }
 
-  await new Promise((r) => setTimeout(r, 250));
-
-  if (id && inFlightItemIds.has(id)) {
-    setItemProgress(id, 80);
-  }
-
-  let result: unknown = { success: true, fn, timestamp: new Date().toISOString() };
-
-  // Realistic mock validations and outcomes:
-  if (fn === "rep_check_in") {
-    if (args.p_fail || args.fail) {
-      if (id) setItemProgress(id, null);
-      throw new Error("Invalid check-in parameters. Count cannot be negative.");
+  try {
+    if (id && inFlightItemIds.has(id)) setItemProgress(id, 60);
+    const result = await apiFetch<Record<string, unknown>>(`/api/rpc/${encodeURIComponent(fn)}`, {
+      method: "POST",
+      body: JSON.stringify({ args }),
+    });
+    if (id) {
+      setItemProgress(id, 100);
+      await new Promise((r) => setTimeout(r, 80));
+      setItemProgress(id, null);
     }
-    const bagCount = (args.p_bag_count ?? args.bag_count) as number | undefined;
-    result = {
-      rep_day_id: "day-" + Date.now(),
-      status: "open",
-      opened_at: new Date().toISOString(),
-      bag_variance_units: 0,
-      initial_count: bagCount ?? 24,
-    };
-  } else if (fn === "log_visit") {
-    result = {
-      visit_id: args.p_id ?? "visit-" + Date.now(),
-      status: "completed",
-      recorded_at: new Date().toISOString(),
-    };
-  } else if (fn === "rep_record_payment") {
-    const amount = Number(args.p_amount ?? args.amount ?? 0);
-    result = {
-      payment_id: args.p_id ?? "pay-" + Date.now(),
-      amount,
-      currency: "PKR",
-      status: "receipt_pending",
-    };
-  } else if (fn === "create_salon") {
-    result = {
-      salon_id: args.p_id ?? "sal-" + Date.now(),
-      name: args.p_name,
-      status: "prospect",
-    };
-  } else if (fn === "rep_submit_delivery") {
-    result = {
-      submission_id: args.p_id ?? "del-" + Date.now(),
-      order_id: args.p_order_id,
-      status: "submitted",
-    };
-  } else if (fn === "rep_attach_signature") {
-    result = {
-      signature_id: args.p_id ?? "sig-" + Date.now(),
-      attached: true,
-    };
+    return result;
+  } catch (err) {
+    if (id) setItemProgress(id, null);
+    throw err;
   }
-
-  if (id) {
-    setItemProgress(id, 100);
-    await new Promise((r) => setTimeout(r, 100));
-    setItemProgress(id, null);
-  }
-
-  return result;
 };
 
 const send = async (fn: OutboxFn, args: Record<string, unknown>, itemId?: string): Promise<unknown> => {
-  return await mockServerDispatch(fn, args, itemId);
+  return await serverDispatch(fn, args, itemId);
 };
 
 const withDrainLock = async <T>(run: () => Promise<T>): Promise<T | "busy"> => {
@@ -258,9 +198,29 @@ const runDrain = async (): Promise<DrainReport> => {
   return drain({ store, userId, send, now: Date.now, lock: withDrainLock });
 };
 
+let drainAgain = false;
+
+const runDrainLoop = async (): Promise<DrainReport> => {
+  let report = await runDrain();
+  while (drainAgain && !isOffline() && report.held === "none") {
+    drainAgain = false;
+    const next = await runDrain();
+    report = {
+      sent: report.sent + next.sent,
+      rejected: report.rejected + next.rejected,
+      held: next.held,
+    };
+  }
+  return report;
+};
+
 export async function sync(): Promise<DrainReport> {
-  if (local.draining) return local.draining;
-  local.draining = runDrain();
+  if (local.draining) {
+    drainAgain = true;
+    return local.draining;
+  }
+  drainAgain = false;
+  local.draining = runDrainLoop();
   try {
     const report = await local.draining;
     changed({
@@ -277,9 +237,6 @@ export async function sync(): Promise<DrainReport> {
   }
 }
 
-/**
- * Executes sync with exponential backoff retries for transient network failures.
- */
 export async function syncWithBackoff(
   maxRetries = 3,
   baseMs = 1000,
@@ -295,7 +252,6 @@ export async function syncWithBackoff(
       }
       attempt++;
       const delay = calculateExponentialBackoff(attempt - 1, baseMs, maxMs);
-      console.warn(`[Outbox Sync] Intermittent failure (attempt ${attempt}/${maxRetries}). Retrying in ${delay}ms...`, err);
       await new Promise((r) => setTimeout(r, delay));
     }
   }
@@ -312,9 +268,7 @@ export const quietSync = async (): Promise<void> => {
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function submit(input: SubmitInput): Promise<"sent" | "queued" | "rejected"> {
-  // Prevent duplicate submission of the same action ID if already in-flight or rapidly tapped
   if (inFlightItemIds.has(input.id)) {
-    console.warn(`[Outbox] Duplicate submission prevented for action ID: ${input.id}`);
     const store = await openIdbStore();
     const mine = await store.list(await captureUserId());
     const existing = mine.find((it) => it.id === input.id);
@@ -341,11 +295,7 @@ export async function listItems(): Promise<OutboxItem[]> {
 }
 
 export async function retryItem(id: string): Promise<void> {
-  // Prevent duplicate submission of the same action ID if user taps retry rapidly or sync is in flight
-  if (inFlightItemIds.has(id)) {
-    console.warn(`[Outbox] Retry ignored for action ID ${id} as it is already transmitting.`);
-    return;
-  }
+  if (inFlightItemIds.has(id)) return;
 
   setItemProgress(id, 5);
   try {

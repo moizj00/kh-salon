@@ -71,7 +71,7 @@ export const OutboxStatus: React.FC = () => {
 
   return (
     <div className="w-full bg-white dark:bg-[#211d1b] border-b border-[#e6dfdb] dark:border-[#3a3330] shadow-xs text-xs">
-      <div className="max-w-md mx-auto px-4 py-2.5 flex items-center justify-between gap-2">
+      <div className="max-w-md md:max-w-5xl mx-auto px-4 py-2 flex items-center justify-between gap-2">
         {/* Connection & Sync Status Indicator */}
         <div className="flex items-center gap-2">
           <button
@@ -151,7 +151,7 @@ export const OutboxStatus: React.FC = () => {
       {/* Transmitting Progress Bar Banner */}
       {state.transmittingIds.length > 0 && (
         <div className="bg-sky-50 dark:bg-sky-950/40 border-t border-sky-200 dark:border-sky-900/40 px-4 py-2">
-          <div className="max-w-md mx-auto space-y-1.5">
+          <div className="max-w-md md:max-w-5xl mx-auto space-y-1.5">
             <div className="flex items-center justify-between text-[11px] font-semibold text-sky-900 dark:text-sky-200">
               <span className="flex items-center gap-1.5">
                 <RefreshCw className="w-3 h-3 animate-spin text-sky-600 dark:text-sky-400" />
@@ -182,7 +182,7 @@ export const OutboxStatus: React.FC = () => {
 
       {/* Expandable Needs Attention & Queue Details Drawer */}
       {expanded && (
-        <div className="max-w-md mx-auto px-4 py-3 border-t border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]">
+        <div className="max-w-md md:max-w-5xl mx-auto px-4 py-3 border-t border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]">
           <h4 className="font-semibold text-[#1d1a19] dark:text-[#f2eeec] mb-2 flex items-center gap-1.5">
             <AlertCircle className="w-4 h-4 text-rose-600" />
             <span>Needs Attention ({rejected.length})</span>

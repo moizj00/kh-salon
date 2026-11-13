@@ -25,7 +25,7 @@ export const BottomNavigation: React.FC<NavigationProps> = ({
 
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-[#1d1a19]/95 backdrop-blur-md border-t border-[#e6dfdb] dark:border-[#3a3330] shadow-lg">
-      <div className="max-w-md mx-auto grid grid-cols-6 h-16 items-center px-1">
+      <div className="max-w-md md:max-w-5xl mx-auto grid grid-cols-6 h-14 items-center px-1">
         {tabs.map((t) => {
           const Icon = t.icon;
           const isActive = activeTab === t.key;
@@ -41,19 +41,16 @@ export const BottomNavigation: React.FC<NavigationProps> = ({
               }`}
             >
               <div className="relative">
-                <Icon className={`w-5 h-5 transition-transform ${isActive ? "scale-110" : ""}`} />
+                <Icon className={`w-5 h-5 transition-transform ${isActive ? "scale-105" : ""}`} />
                 {t.badge && (
                   <span className="absolute -top-1.5 -right-2.5 bg-amber-600 text-white text-[9px] font-extrabold w-4 h-4 rounded-full flex items-center justify-center">
                     {t.badge}
                   </span>
                 )}
               </div>
-              <span className="text-[10px] tracking-tight mt-1 leading-none">
+              <span className="text-[10px] tracking-tight mt-0.5 leading-none whitespace-nowrap">
                 {t.label}
               </span>
-              {isActive && (
-                <span className="absolute bottom-1 w-1 h-1 rounded-full bg-[#7a2e4a] dark:bg-[#d77a9c]" />
-              )}
             </button>
           );
         })}

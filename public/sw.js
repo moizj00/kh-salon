@@ -33,8 +33,9 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  // Security rule: Never cache office, salon portal, rpc calls, or auth mutations
+  // Security rule: Never cache office, salon portal, API routes, rpc calls, or auth mutations
   if (
+    url.pathname.startsWith("/api/") ||
     url.pathname.startsWith("/office") ||
     url.pathname.startsWith("/salon") ||
     url.pathname.includes("/rpc") ||

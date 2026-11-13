@@ -1,19 +1,27 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   INITIAL_ORDERS,
   INITIAL_ROUTE,
   INITIAL_SALONS,
   INITIAL_SKUS,
-  type DeliveryOrder,
   type RouteStop,
   type SKU,
-  type Salon,
 } from "./lib/data";
+import {
+  ApiError,
+  fetchBootstrap,
+  fetchSalonActivity,
+  getAuthConfig,
+  getAuthToken,
+  getCurrentUser,
+  setAuthToken,
+} from "./lib/api";
 import {
   discardItem,
   isOffline,
   listItems,
   retryItem,
+  setSessionUserId,
   setSimulatedOffline,
   startSync,
   submit,
@@ -25,39 +33,64 @@ import type { OutboxItem } from "./lib/outbox/types";
 import { cachedRows } from "./lib/cache";
 import { registerServiceWorker } from "./lib/register-sw";
 import { when } from "./lib/time";
+import { AuthGate } from "./components/auth-gate";
+import { ManagerDashboard } from "./components/manager-dashboard";
 import { BottomNavigation, type TabKey } from "./components/navigation";
 import { OutboxStatus } from "./components/outbox-status";
 import { PWAInstallButton } from "./components/pwa-install";
 import { RepMonth } from "./components/rep-month";
 import { SignaturePad } from "./components/signature-pad";
 import { StorefrontView } from "./components/storefront";
+import type {
+  DeliveryOrderFull,
+  RepMonthlyStats,
+  SalonActivityPayload,
+  SalonWithApproval,
+  UserProfile,
+} from "./server/types";
 import {
   AlertTriangle,
   ArrowLeft,
+  Briefcase,
   CalendarCheck,
   Check,
   Clock,
   Coins,
   FileText,
+  LogOut,
   MapPin,
   Package,
   Plus,
   RefreshCw,
   Search,
   ShieldCheck,
-  Store,
   UserCheck,
   X,
 } from "lucide-react";
 
+const DEFAULT_STATS: RepMonthlyStats = {
+  visitsCompleted: 2,
+  visitsTarget: 50,
+  cashCollectedPkr: 50500,
+  ordersCount: 3,
+  monthLabel: "November 2026 Target",
+};
+
 export default function App() {
+  // Authentication & Workspace Mode
+  const [authReady, setAuthReady] = useState(false);
+  const [authConfigured, setAuthConfigured] = useState(false);
+  const [user, setUser] = useState<UserProfile | null>(null);
+  const [workspaceMode, setWorkspaceMode] = useState<"rep" | "manager">("rep");
+
   const [activeTab, setActiveTab] = useState<TabKey>("today");
   const [items, setItems] = useState<OutboxItem[]>([]);
   const [outboxState, setOutboxState] = useState(syncState());
-  const [salons, setSalons] = useState<Salon[]>(INITIAL_SALONS);
+  const [salons, setSalons] = useState<SalonWithApproval[]>(INITIAL_SALONS);
   const [route, setRoute] = useState<RouteStop[]>(INITIAL_ROUTE);
-  const [orders, setOrders] = useState<DeliveryOrder[]>(INITIAL_ORDERS);
+  const [orders, setOrders] = useState<DeliveryOrderFull[]>(INITIAL_ORDERS);
   const [skus, setSkus] = useState<SKU[]>(INITIAL_SKUS);
+  const [monthlyStats, setMonthlyStats] = useState<RepMonthlyStats>(DEFAULT_STATS);
 
   // Rep day shift state
   const [dayOpen, setDayOpen] = useState(false);
@@ -65,8 +98,10 @@ export default function App() {
   const [showCheckInModal, setShowCheckInModal] = useState(false);
   const [showCheckOutModal, setShowCheckOutModal] = useState(false);
 
-  // Selected salon for details
+  // Selected salon for details & live activity
   const [selectedSalonId, setSelectedSalonId] = useState<string | null>(null);
+  const [salonActivity, setSalonActivity] = useState<SalonActivityPayload | null>(null);
+  const [loadingActivity, setLoadingActivity] = useState(false);
   const [salonSearch, setSalonSearch] = useState("");
   const [salonFilter, setSalonFilter] = useState<"all" | "regular" | "vip" | "trial" | "prospect">("all");
 
@@ -83,29 +118,110 @@ export default function App() {
   const [newSalonArea, setNewSalonArea] = useState("Clifton, Karachi");
   const [newSalonPhone, setNewSalonPhone] = useState("");
   const [newSalonContact, setNewSalonContact] = useState("");
+  const [confirmWipe, setConfirmWipe] = useState(false);
 
   // Delivery order signing
   const [signingOrderId, setSigningOrderId] = useState<string | null>(null);
 
   // Feedback notifications / toasts
   const [toast, setToast] = useState<{ message: string; type: "ok" | "info" | "warn" } | null>(null);
+  const lastSyncRef = useRef<number | null>(null);
 
-  const showToast = (message: string, type: "ok" | "info" | "warn" = "ok") => {
+  const showToast = useCallback((message: string, type: "ok" | "info" | "warn" = "ok") => {
     setToast({ message, type });
-    setTimeout(() => {
+    window.setTimeout(() => {
       setToast(null);
     }, 4500);
-  };
+  }, []);
 
-  // Register service worker and start sync cycle
+  const refreshBootstrap = useCallback(async () => {
+    if (!getAuthToken() || isOffline()) return;
+    try {
+      const res = await cachedRows("bootstrap_salons", async () => {
+        const boot = await fetchBootstrap();
+        setRoute(boot.route);
+        setSkus(boot.skus);
+        setOrders(boot.orders);
+        setDayOpen(Boolean(boot.activeShift));
+        setBagCount(boot.currentBagCount);
+        setMonthlyStats(boot.stats);
+        return boot.salons;
+      });
+      setSalons(res.rows);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 503) {
+        showToast(err.message, "warn");
+      }
+    }
+  }, [showToast]);
+
+  const loadSalonActivity = useCallback(async (salonId: string) => {
+    if (!getAuthToken() || isOffline()) {
+      setSalonActivity(null);
+      return;
+    }
+    setLoadingActivity(true);
+    try {
+      const activity = await fetchSalonActivity(salonId);
+      setSalonActivity(activity);
+    } catch {
+      setSalonActivity(null);
+    } finally {
+      setLoadingActivity(false);
+    }
+  }, []);
+
+  // Initialize auth & service worker
   useEffect(() => {
     registerServiceWorker();
+    let mounted = true;
+
+    const init = async () => {
+      try {
+        const cfg = await getAuthConfig();
+        if (mounted) setAuthConfigured(cfg.authConfigured);
+      } catch {
+        // Ignore offline config fetch error
+      }
+
+      const token = getAuthToken();
+      if (token) {
+        try {
+          const { user: current } = await getCurrentUser();
+          if (mounted) {
+            setUser(current);
+            setSessionUserId(current.id);
+            setWorkspaceMode(current.role === "manager" ? "manager" : "rep");
+          }
+        } catch {
+          setAuthToken(null);
+        }
+      }
+      if (mounted) setAuthReady(true);
+    };
+
+    void init();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // Start outbox sync cycle once authenticated
+  useEffect(() => {
+    if (!user) return;
+    void refreshBootstrap();
     const stopSync = startSync();
 
     const refreshOutbox = async () => {
       const all = await listItems();
+      const nextState = syncState();
       setItems(all);
-      setOutboxState(syncState());
+      setOutboxState(nextState);
+
+      if (nextState.lastSyncAt && nextState.lastSyncAt !== lastSyncRef.current) {
+        lastSyncRef.current = nextState.lastSyncAt;
+        void refreshBootstrap();
+      }
     };
 
     void refreshOutbox();
@@ -113,16 +229,47 @@ export default function App() {
       void refreshOutbox();
     });
 
-    // Populate with cachedRows to demonstrate encrypted read cache (Task 7)
-    void cachedRows("salons_list", async () => INITIAL_SALONS).then((res) => {
-      setSalons(res.rows);
-    });
-
     return () => {
       stopSync();
       unsub();
     };
-  }, []);
+  }, [user, refreshBootstrap]);
+
+  // Load salon activity whenever a salon is selected
+  useEffect(() => {
+    if (selectedSalonId && user) {
+      void loadSalonActivity(selectedSalonId);
+    } else {
+      setSalonActivity(null);
+    }
+  }, [selectedSalonId, user, loadSalonActivity]);
+
+  const handleAuthenticated = (authedUser: UserProfile) => {
+    setUser(authedUser);
+    setSessionUserId(authedUser.id);
+    setWorkspaceMode(authedUser.role === "manager" ? "manager" : "rep");
+  };
+
+  const handleSignOut = () => {
+    setAuthToken(null);
+    setUser(null);
+    setSelectedSalonId(null);
+    setWorkspaceMode("rep");
+  };
+
+  if (!authReady) {
+    return (
+      <div className="min-h-screen bg-[#faf7f5] dark:bg-[#171413] flex items-center justify-center p-4">
+        <div className="text-xs font-medium text-[#6b625e] dark:text-[#a59b96]">
+          Loading Kiran DMS...
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthGate authConfigured={authConfigured} onAuthenticated={handleAuthenticated} />;
+  }
 
   const pendingItems = items.filter((i) => i.state === "pending");
   const currentSalon = salons.find((s) => s.id === selectedSalonId) || null;
@@ -140,13 +287,18 @@ export default function App() {
       capturedAt: new Date().toISOString(),
     });
 
-    setDayOpen(true);
-    setBagCount(count);
+    if (res !== "rejected") {
+      setDayOpen(true);
+      setBagCount(count);
+    }
 
     if (res === "queued") {
-      showToast(`Check-in saved on phone (Offline). Queue updated.`, "info");
+      showToast("Check-in saved on phone (Offline). Queue updated.", "info");
+    } else if (res === "rejected") {
+      showToast("Check-in rejected by server. Review Outbox.", "warn");
     } else {
-      showToast(`Day successfully opened with ${count} units counted.`, "ok");
+      showToast(`Day opened with ${count} units counted.`, "ok");
+      void refreshBootstrap();
     }
   };
 
@@ -154,7 +306,7 @@ export default function App() {
   const handleCheckOut = async (count: number) => {
     setShowCheckOutModal(false);
     const countId = `cnt-${Date.now()}`;
-    await submit({
+    const countRes = await submit({
       id: countId,
       fn: "record_count",
       args: { p_id: countId, p_count: count, p_at_client: new Date().toISOString() },
@@ -163,24 +315,39 @@ export default function App() {
       capturedAt: new Date().toISOString(),
     });
 
+    if (countRes === "rejected") {
+      showToast("Bag count was rejected by server. Review Outbox.", "warn");
+      return;
+    }
+
     const closeId = `cls-${Date.now()}`;
     const res = await submit({
       id: closeId,
       fn: "rep_check_out",
-      args: { p_id: closeId, p_at_client: new Date().toISOString() },
-      label: `End Day Shift Check-Out`,
+      args: {
+        p_id: closeId,
+        p_count_id: countId,
+        p_count: count,
+        p_at_client: new Date().toISOString(),
+      },
+      label: "End Day Shift Check-Out",
       salonId: null,
       capturedAt: new Date().toISOString(),
       dependsOn: { itemId: countId, argName: "p_count_id" },
     });
 
-    setDayOpen(false);
-    setBagCount(count);
+    if (res !== "rejected") {
+      setDayOpen(false);
+      setBagCount(count);
+    }
 
     if (res === "queued") {
-      showToast(`Daily close saved on phone (Offline). Will drain when online.`, "info");
+      showToast("Daily close saved on phone (Offline). Will drain when online.", "info");
+    } else if (res === "rejected") {
+      showToast("Daily close rejected by server. Review Outbox.", "warn");
     } else {
-      showToast(`Day shift closed. Variance calculated and recorded.`, "ok");
+      showToast("Day shift closed. Variance calculated and recorded.", "ok");
+      void refreshBootstrap();
     }
   };
 
@@ -199,7 +366,7 @@ export default function App() {
               lng: Number(p.coords.longitude.toFixed(6)),
             }),
           () => resolve(null),
-          { enableHighAccuracy: true, timeout: 5000, maximumAge: 60000 },
+          { enableHighAccuracy: true, timeout: 3000, maximumAge: 60000 },
         );
       });
     }
@@ -227,6 +394,8 @@ export default function App() {
       showToast(`Visit for ${currentSalon.name} saved on phone${gpsMsg}.`, "info");
     } else {
       showToast(`Visit logged${gpsMsg} and synced to server.`, "ok");
+      void refreshBootstrap();
+      void loadSalonActivity(currentSalon.id);
     }
   };
 
@@ -254,7 +423,6 @@ export default function App() {
     });
 
     setPaymentAmount("");
-    // Deduct locally for immediate UI responsiveness
     setSalons((prev) =>
       prev.map((s) =>
         s.id === currentSalon.id ? { ...s, outstanding_balance: Math.max(0, s.outstanding_balance - amount) } : s,
@@ -264,7 +432,9 @@ export default function App() {
     if (res === "queued") {
       showToast(`PKR ${amount.toLocaleString()} saved on this phone. Receipt generated after sync.`, "info");
     } else {
-      showToast(`PKR ${amount.toLocaleString()} payment recorded. SMS receipt dispatched.`, "ok");
+      showToast(`PKR ${amount.toLocaleString()} payment recorded and synced.`, "ok");
+      void refreshBootstrap();
+      void loadSalonActivity(currentSalon.id);
     }
   };
 
@@ -293,9 +463,11 @@ export default function App() {
     });
 
     if (res === "queued") {
-      showToast(`Order card saved on phone.`, "info");
+      showToast("Order card saved on phone.", "info");
     } else {
-      showToast(`Order card sent to office.`, "ok");
+      showToast("Order card sent to Office Manager for dispatch approval.", "ok");
+      void refreshBootstrap();
+      void loadSalonActivity(currentSalon.id);
     }
   };
 
@@ -304,14 +476,15 @@ export default function App() {
     if (!newSalonName.trim()) return;
     setShowNewSalonModal(false);
     const id = `sal-${Date.now()}`;
-    const newRecord: Salon = {
+    const newRecord: SalonWithApproval = {
       id,
-      name: newSalonName,
-      area: newSalonArea,
-      address: `${newSalonArea}, Karachi`,
-      phone: newSalonPhone || "0300-1234567",
-      contact_person: newSalonContact || "Owner",
+      name: newSalonName.trim(),
+      area: newSalonArea.trim() || "Karachi",
+      address: `${newSalonArea.trim() || "Karachi"}, Karachi`,
+      phone: newSalonPhone.trim() || "0300-1234567",
+      contact_person: newSalonContact.trim() || "Owner",
       stage: "prospect",
+      approval_status: "pending_review",
       outstanding_balance: 0,
       credit_limit: 25000,
       last_visited_at: new Date().toISOString(),
@@ -325,13 +498,13 @@ export default function App() {
       fn: "create_salon",
       args: {
         p_id: id,
-        p_name: newSalonName,
-        p_area: newSalonArea,
-        p_phone: newSalonPhone,
-        p_contact: newSalonContact,
+        p_name: newRecord.name,
+        p_area: newRecord.area,
+        p_phone: newRecord.phone,
+        p_contact: newRecord.contact_person,
         p_at_client: new Date().toISOString(),
       },
-      label: `New Prospect: ${newSalonName}`,
+      label: `New Prospect: ${newRecord.name}`,
       salonId: id,
       capturedAt: new Date().toISOString(),
     });
@@ -343,7 +516,8 @@ export default function App() {
     if (res === "queued") {
       showToast(`Prospect ${newRecord.name} saved on phone.`, "info");
     } else {
-      showToast(`Prospect registered in Karachi roster.`, "ok");
+      showToast("Prospect registered and queued for Office approval.", "ok");
+      void refreshBootstrap();
     }
   };
 
@@ -355,7 +529,6 @@ export default function App() {
 
     setSigningOrderId(null);
 
-    // Parent item: rep_submit_delivery
     const deliveryId = `del-${Date.now()}`;
     const resDelivery = await submit({
       id: deliveryId,
@@ -372,15 +545,19 @@ export default function App() {
       capturedAt: new Date().toISOString(),
     });
 
-    // Dependent child item: rep_attach_signature (waits for delivery submission)
+    if (resDelivery === "rejected") {
+      showToast("Delivery submission was rejected. Review Outbox.", "warn");
+      return;
+    }
+
     const sigId = `sig-${Date.now()}`;
-    await submit({
+    const resSig = await submit({
       id: sigId,
       fn: "rep_attach_signature",
       args: {
         p_id: sigId,
         p_delivery_id: deliveryId,
-        p_signature_data: signatureDataUrl.slice(0, 80) + "...[sealed]",
+        p_signature_data: signatureDataUrl.slice(0, 120) + "...[sealed]",
         p_at_client: new Date().toISOString(),
       },
       label: `Signature for ${order.order_number}`,
@@ -389,21 +566,24 @@ export default function App() {
       dependsOn: { itemId: deliveryId, argName: "p_delivery_id" },
     });
 
-    // Update local orders
-    setOrders((prev) =>
-      prev.map((o) =>
-        o.id === order.id ? { ...o, status: "delivered", delivered_at: new Date().toISOString() } : o,
-      ),
-    );
+    if (resSig !== "rejected") {
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === order.id ? { ...o, status: "delivered", delivered_at: new Date().toISOString() } : o,
+        ),
+      );
+    }
 
-    if (resDelivery === "queued") {
-      showToast(`Delivery & Customer signature queued on phone.`, "info");
+    if (resDelivery === "queued" || resSig === "queued") {
+      showToast("Delivery & Customer signature queued on phone.", "info");
+    } else if (resSig === "rejected") {
+      showToast("Signature attachment rejected. Review Outbox.", "warn");
     } else {
-      showToast(`Delivery confirmed with customer signature.`, "ok");
+      showToast("Delivery confirmed with customer signature.", "ok");
+      void refreshBootstrap();
     }
   };
 
-  // Filter salons
   const filteredSalons = salons.filter((s) => {
     const matchesSearch =
       s.name.toLowerCase().includes(salonSearch.toLowerCase()) ||
@@ -413,41 +593,54 @@ export default function App() {
   });
 
   return (
-    <div className="min-h-screen bg-[#faf7f5] dark:bg-[#171413] text-[#1d1a19] dark:text-[#f2eeec] flex flex-col pb-20 selection:bg-[#7a2e4a]/20">
-      {/* Top Header Contract */}
+    <div
+      className={`min-h-screen bg-[#faf7f5] dark:bg-[#171413] text-[#1d1a19] dark:text-[#f2eeec] flex flex-col selection:bg-[#7a2e4a]/20 ${
+        workspaceMode === "rep" ? "pb-20" : "pb-8"
+      }`}
+    >
+      {/* Top Bar Contract (single compact row) */}
       <header className="sticky top-0 z-30 bg-white/95 dark:bg-[#211d1b]/95 backdrop-blur-md border-b border-[#e6dfdb] dark:border-[#3a3330]">
-        <div className="max-w-md mx-auto px-4 h-14 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
+        <div className="max-w-md md:max-w-5xl mx-auto px-4 h-13 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2.5 shrink-0">
             <div className="w-8 h-8 rounded-lg bg-[#7a2e4a] flex items-center justify-center text-white font-bold text-sm shadow-xs">
               K
             </div>
-            <div>
-              <div className="font-bold text-sm tracking-tight leading-tight flex items-center gap-1.5">
-                <span>Kiran DMS</span>
-                <span className="text-[10px] font-medium text-[#7a2e4a] dark:text-[#d77a9c] bg-[#7a2e4a]/10 dark:bg-[#7a2e4a]/30 px-1.5 py-0.2 rounded">
-                  Rep PWA
-                </span>
-              </div>
-              <div className="text-[10px] text-[#6b625e] dark:text-[#a59b96] leading-none">
-                Karachi Central · Pilot Roster
-              </div>
-            </div>
+            <span className="font-bold text-sm tracking-tight whitespace-nowrap">Kiran DMS</span>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setWorkspaceMode(workspaceMode === "rep" ? "manager" : "rep")}
+              className="px-3 py-1.5 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold flex items-center gap-1.5 hover:border-[#7a2e4a] whitespace-nowrap"
+            >
+              <Briefcase className="w-3.5 h-3.5 text-[#7a2e4a] dark:text-[#d77a9c]" />
+              <span>{workspaceMode === "rep" ? "Office Manager" : "Field Rep"}</span>
+            </button>
+
             <PWAInstallButton />
+
+            <button
+              type="button"
+              aria-label="Sign out"
+              onClick={handleSignOut}
+              className="p-2 rounded-lg text-[#6b625e] hover:text-[#1d1a19] dark:hover:text-white"
+              title={`Signed in as ${user.fullName}`}
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
           </div>
         </div>
 
-        {/* Outbox Status Banner */}
-        <OutboxStatus />
+        {/* Outbox Status Banner (shown in Field Rep mode) */}
+        {workspaceMode === "rep" && <OutboxStatus />}
       </header>
 
       {/* Toast Notification */}
       {toast && (
         <div className="fixed top-24 left-1/2 -translate-x-1/2 z-50 max-w-sm w-11/12">
           <div
-            className={`p-3 rounded-xl shadow-lg border text-xs font-medium flex items-center gap-2.5 animate-in fade-in slide-in-from-top-2 duration-200 ${
+            className={`p-3 rounded-xl shadow-lg border text-xs font-medium flex items-center gap-2.5 ${
               toast.type === "ok"
                 ? "bg-emerald-900 text-white border-emerald-800"
                 : toast.type === "warn"
@@ -459,6 +652,7 @@ export default function App() {
             <span className="flex-1">{toast.message}</span>
             <button
               type="button"
+              aria-label="Dismiss notification"
               onClick={() => setToast(null)}
               className="p-1 hover:opacity-70 text-white/80"
             >
@@ -469,738 +663,843 @@ export default function App() {
       )}
 
       {/* Main Content Area */}
-      <main className="max-w-md w-full mx-auto px-4 py-4 flex-1">
-        {/* ================= TAB 1: TODAY ================= */}
-        {activeTab === "today" && (
-          <div className="space-y-4">
-            {/* Shift Banner */}
-            <div className="bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] rounded-2xl p-4 shadow-xs">
-              <div className="flex items-center justify-between mb-2">
-                <div>
-                  <h2 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
-                    Salaam, Rashid Khan
-                  </h2>
-                  <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                    Field Sales Rep · Phone: Approved
-                  </div>
-                </div>
-
-                <span
-                  className={`text-xs font-semibold px-2.5 py-1 rounded-full flex items-center gap-1 ${
-                    dayOpen
-                      ? "bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300"
-                      : "bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200"
-                  }`}
-                >
-                  <span
-                    className={`w-2 h-2 rounded-full ${
-                      dayOpen ? "bg-emerald-600 animate-pulse" : "bg-amber-600"
-                    }`}
-                  />
-                  <span>{dayOpen ? "Shift Open" : "Day Not Started"}</span>
-                </span>
-              </div>
-
-              {/* Day Actions */}
-              <div className="pt-2 border-t border-[#e6dfdb]/60 dark:border-[#3a3330]">
-                {!dayOpen ? (
-                  <button
-                    type="button"
-                    onClick={() => setShowCheckInModal(true)}
-                    className="w-full h-12 rounded-xl bg-[#7a2e4a] text-white font-semibold text-sm flex items-center justify-center gap-2 shadow-xs hover:opacity-95 active:scale-[0.99] transition"
-                  >
-                    <CalendarCheck className="w-4 h-4" />
-                    <span>Check In & Count Bag Stock</span>
-                  </button>
-                ) : (
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-xs">
-                      <span className="text-[#6b625e] dark:text-[#a59b96]">Current Bag:</span>{" "}
-                      <strong className="text-sm tabular-nums text-[#1d1a19] dark:text-[#f2eeec]">
-                        {bagCount} units
-                      </strong>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowCheckOutModal(true)}
-                      className="px-3 py-2 rounded-xl border border-rose-300 dark:border-rose-900/60 text-rose-700 dark:text-rose-400 text-xs font-semibold hover:bg-rose-50 dark:hover:bg-rose-950/40"
-                    >
-                      End Day (Daily Close)
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Rep Monthly Target Card */}
-            <RepMonth />
-
-            {/* Quick Actions Grid */}
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                type="button"
-                onClick={() => setActiveTab("route")}
-                className="p-3.5 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-left hover:border-[#7a2e4a] transition-colors"
-              >
-                <div className="w-8 h-8 rounded-xl bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 flex items-center justify-center mb-2">
-                  <MapPin className="w-4 h-4" />
-                </div>
-                <div className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">Today's Route</div>
-                <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                  {route.filter((r) => r.status === "pending").length} stops remaining
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTab("orders")}
-                className="p-3.5 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-left hover:border-[#7a2e4a] transition-colors"
-              >
-                <div className="w-8 h-8 rounded-xl bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 flex items-center justify-center mb-2">
-                  <Package className="w-4 h-4" />
-                </div>
-                <div className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">Deliveries</div>
-                <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                  {orders.filter((o) => o.status === "pending_delivery").length} awaiting signature
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowNewSalonModal(true)}
-                className="p-3.5 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-left hover:border-[#7a2e4a] transition-colors"
-              >
-                <div className="w-8 h-8 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 flex items-center justify-center mb-2">
-                  <Plus className="w-4 h-4" />
-                </div>
-                <div className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">New Prospect</div>
-                <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">Add salon offline</div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTab("outbox")}
-                className="p-3.5 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-left hover:border-[#7a2e4a] transition-colors"
-              >
-                <div className="w-8 h-8 rounded-xl bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 flex items-center justify-center mb-2">
-                  <Clock className="w-4 h-4" />
-                </div>
-                <div className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">Outbox Queue</div>
-                <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                  {pendingItems.length} items waiting
-                </div>
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ================= TAB 2: ROUTE ================= */}
-        {activeTab === "route" && (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
-                  Today's Scheduled Route
-                </h2>
-                <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                  Karachi Central & South · {route.length} stops generated
-                </p>
-              </div>
-
-              <span className="text-xs font-semibold px-2 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-300">
-                Cycle: Week 2
-              </span>
-            </div>
-
-            <div className="space-y-2.5">
-              {route.map((stop) => (
-                <div
-                  key={stop.id}
-                  className="p-3.5 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs flex items-center justify-between gap-3"
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="w-7 h-7 rounded-full bg-[#7a2e4a] text-white font-bold text-xs flex items-center justify-center shrink-0 mt-0.5">
-                      {stop.stop_number}
-                    </div>
-                    <div>
-                      <h4 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
-                        {stop.salon_name}
-                      </h4>
-                      <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                        {stop.area}
-                      </p>
-                      <div className="flex items-center gap-2 text-[11px] mt-1 text-[#6b625e] dark:text-[#a59b96]">
-                        <span className="capitalize">
-                          {stop.due_reason.replace("_", " ")}
-                        </span>
-                        {stop.balance > 0 && (
-                          <>
-                            <span>·</span>
-                            <span className="font-semibold text-rose-600 dark:text-rose-400 tabular-nums">
-                              Due: PKR {stop.balance.toLocaleString()}
-                            </span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedSalonId(stop.salon_id);
-                      setActiveTab("salons");
-                    }}
-                    className="px-3 py-2 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold hover:border-[#7a2e4a] text-[#7a2e4a] dark:text-[#d77a9c]"
-                  >
-                    Open
-                  </button>
-                </div>
-              ))}
-            </div>
-
-            {/* Lost Demand Quick Capture (P1-17, Task 8) */}
-            <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-300/40 text-xs space-y-2">
-              <div className="font-bold text-amber-900 dark:text-amber-200 flex items-center gap-1.5">
-                <AlertTriangle className="w-4 h-4 text-amber-600" />
-                <span>Customer Asked for Unstocked Item? (Lost Demand)</span>
-              </div>
-              <p className="text-[#6b625e] dark:text-[#a59b96]">
-                Tap below to record missed product requests directly to the demand ledger.
-              </p>
-              <button
-                type="button"
-                onClick={async () => {
-                  const id = `dem-${Date.now()}`;
-                  await submit({
-                    id,
-                    fn: "record_demand",
-                    args: {
-                      p_id: id,
-                      p_sku_name: "Kiran Brazilian Keratin 1L",
-                      p_qty: 2,
-                      p_at_client: new Date().toISOString(),
-                    },
-                    label: `Lost Demand: 2x Keratin 1L`,
-                    salonId: null,
-                    capturedAt: new Date().toISOString(),
-                  });
-                  showToast("Lost demand captured for inventory planning.", "ok");
-                }}
-                className="w-full py-2 rounded-lg bg-amber-600 text-white font-medium text-xs hover:bg-amber-700"
-              >
-                Log 2x Keratin 1L Request
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ================= TAB 3: SALONS (ROSTER & DETAIL) ================= */}
-        {activeTab === "salons" && (
-          <div className="space-y-4">
-            {selectedSalonId && currentSalon ? (
-              /* Salon Profile & Action View */
-              <div className="space-y-4">
-                <button
-                  type="button"
-                  onClick={() => setSelectedSalonId(null)}
-                  className="flex items-center gap-1.5 text-xs font-semibold text-[#7a2e4a] dark:text-[#d77a9c] hover:underline"
-                >
-                  <ArrowLeft className="w-3.5 h-3.5" />
-                  <span>Back to Salons Roster</span>
-                </button>
-
-                {/* Salon Header Card */}
-                <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-2.5">
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <h3 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
-                        {currentSalon.name}
-                      </h3>
-                      <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                        {currentSalon.address}
-                      </p>
-                    </div>
-                    <span className="text-xs uppercase font-bold px-2 py-0.5 rounded bg-[#7a2e4a]/10 text-[#7a2e4a] dark:text-[#d77a9c]">
-                      {currentSalon.stage}
-                    </span>
-                  </div>
-
-                  <div className="pt-2 border-t border-[#e6dfdb]/60 dark:border-[#3a3330] grid grid-cols-2 gap-2 text-xs">
-                    <div>
-                      <span className="text-[#6b625e] dark:text-[#a59b96]">Contact:</span>{" "}
-                      <strong>{currentSalon.contact_person}</strong>
-                    </div>
-                    <div>
-                      <span className="text-[#6b625e] dark:text-[#a59b96]">Phone:</span>{" "}
-                      <a
-                        href={`tel:${currentSalon.phone}`}
-                        className="text-[#7a2e4a] dark:text-[#d77a9c] font-medium"
-                      >
-                        {currentSalon.phone}
-                      </a>
-                    </div>
-                    <div>
-                      <span className="text-[#6b625e] dark:text-[#a59b96]">Balance Due:</span>{" "}
-                      <strong className="text-rose-600 dark:text-rose-400 tabular-nums">
-                        PKR {currentSalon.outstanding_balance.toLocaleString()}
-                      </strong>
-                    </div>
-                    <div>
-                      <span className="text-[#6b625e] dark:text-[#a59b96]">Credit Limit:</span>{" "}
-                      <strong className="tabular-nums">
-                        PKR {currentSalon.credit_limit.toLocaleString()}
-                      </strong>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Field Action Buttons */}
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowVisitModal(true)}
-                    className="p-3 rounded-xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-center hover:border-[#7a2e4a] flex flex-col items-center justify-center gap-1.5"
-                  >
-                    <UserCheck className="w-5 h-5 text-[#7a2e4a]" />
-                    <span className="text-xs font-semibold">Log Visit</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setShowPaymentModal(true)}
-                    className="p-3 rounded-xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-center hover:border-[#7a2e4a] flex flex-col items-center justify-center gap-1.5"
-                  >
-                    <Coins className="w-5 h-5 text-emerald-600" />
-                    <span className="text-xs font-semibold">Receive Cash</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setShowCardModal(true)}
-                    className="p-3 rounded-xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-center hover:border-[#7a2e4a] flex flex-col items-center justify-center gap-1.5"
-                  >
-                    <FileText className="w-5 h-5 text-indigo-600" />
-                    <span className="text-xs font-semibold">Take Order</span>
-                  </button>
-                </div>
-
-                {/* Past visit info */}
-                <div className="p-3 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb]/60 dark:border-[#3a3330] text-xs text-[#6b625e] dark:text-[#a59b96]">
-                  Last visit: {currentSalon.last_visited_at ? when(currentSalon.last_visited_at) : "No visits logged yet."}
-                </div>
-              </div>
-            ) : (
-              /* Salons Roster List */
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
-                      Salons Roster
-                    </h2>
-                    <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                      {filteredSalons.length} salons in Karachi territory
-                    </p>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => setShowNewSalonModal(true)}
-                    className="px-3 py-1.5 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold flex items-center gap-1 shadow-xs"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Prospect</span>
-                  </button>
-                </div>
-
-                {/* Search Bar */}
-                <div className="relative">
-                  <Search className="w-4 h-4 absolute left-3 top-3 text-[#6b625e]" />
-                  <input
-                    type="text"
-                    placeholder="Search salon name or area..."
-                    value={salonSearch}
-                    onChange={(e) => setSalonSearch(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-white dark:bg-[#211d1b]"
-                  />
-                </div>
-
-                {/* Filter segments */}
-                <div className="flex items-center gap-1 overflow-x-auto pb-1 text-xs">
-                  {(["all", "vip", "regular", "trial", "prospect"] as const).map((st) => (
-                    <button
-                      key={st}
-                      type="button"
-                      onClick={() => setSalonFilter(st)}
-                      className={`px-3 py-1 rounded-lg capitalize whitespace-nowrap transition-colors ${
-                        salonFilter === st
-                          ? "bg-[#7a2e4a] text-white font-semibold"
-                          : "bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-[#6b625e]"
-                      }`}
-                    >
-                      {st}
-                    </button>
-                  ))}
-                </div>
-
-                {/* List Items */}
-                <div className="space-y-2">
-                  {filteredSalons.map((salon) => (
-                    <div
-                      key={salon.id}
-                      onClick={() => setSelectedSalonId(salon.id)}
-                      className="p-3.5 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs cursor-pointer hover:border-[#7a2e4a] transition-colors"
-                    >
-                      <div className="flex items-start justify-between">
-                        <div>
-                          <h4 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
-                            {salon.name}
-                          </h4>
-                          <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                            {salon.area}
-                          </p>
-                        </div>
-                        <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-black/5 dark:bg-white/5">
-                          {salon.stage}
-                        </span>
-                      </div>
-
-                      <div className="mt-2 pt-2 border-t border-[#e6dfdb]/60 dark:border-[#3a3330] flex items-center justify-between text-xs">
-                        <span className="text-[#6b625e] dark:text-[#a59b96]">
-                          {salon.contact_person}
-                        </span>
-                        {salon.outstanding_balance > 0 ? (
-                          <span className="font-semibold text-rose-600 dark:text-rose-400 tabular-nums">
-                            Due: PKR {salon.outstanding_balance.toLocaleString()}
-                          </span>
-                        ) : (
-                          <span className="text-emerald-600 font-semibold">Cleared</span>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ================= TAB 3.5: PUBLIC SHOP (khsalon.com) ================= */}
-        {activeTab === "shop" && (
-          <StorefrontView
-            onOpenSalonOrderModal={(prodName) => {
-              setSelectedSalonId(salons[0]?.id || "sal-clifton-01");
-              setShowCardModal(true);
-              showToast(`Order details for ${prodName} opened.`, "info");
-            }}
+      <main className="max-w-md md:max-w-5xl w-full mx-auto px-4 py-5 flex-1">
+        {workspaceMode === "manager" ? (
+          <ManagerDashboard
             showToast={showToast}
+            onApprovedChange={() => {
+              void refreshBootstrap();
+            }}
           />
-        )}
-
-        {/* ================= TAB 4: ORDERS & DELIVERIES ================= */}
-        {activeTab === "orders" && (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
-                  Deliveries & Signature (P1-31)
-                </h2>
-                <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                  Deliver goods with customer signed digital acknowledgement
-                </p>
-              </div>
-            </div>
-
-            {signingOrderId ? (
-              /* Signature Drawing Pad */
-              <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-3">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
-                    Customer Signature
-                  </h3>
-                  <button
-                    type="button"
-                    onClick={() => setSigningOrderId(null)}
-                    className="p-1 text-[#6b625e]"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {(() => {
-                  const ord = orders.find((o) => o.id === signingOrderId);
-                  return ord ? (
-                    <SignaturePad
-                      salonName={ord.salon_name}
-                      onCapture={handleConfirmDeliverySignature}
-                    />
-                  ) : null;
-                })()}
-              </div>
-            ) : (
-              /* Orders List */
-              <div className="space-y-3">
-                {orders.map((order) => (
-                  <div
-                    key={order.id}
-                    className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-2.5"
-                  >
-                    <div className="flex items-start justify-between">
+        ) : (
+          <>
+            {/* ================= TAB 1: TODAY ================= */}
+            {activeTab === "today" && (
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-stretch">
+                  {/* Shift Banner */}
+                  <div className="bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] rounded-2xl p-4 shadow-xs flex flex-col justify-between gap-3">
+                    <div className="flex items-start justify-between gap-2">
                       <div>
-                        <span className="text-[11px] font-mono text-[#6b625e]">
-                          {order.order_number}
-                        </span>
-                        <h4 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
-                          {order.salon_name}
-                        </h4>
+                        <h2 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
+                          Salaam, {user.fullName}
+                        </h2>
+                        <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                          {user.territory} · {user.email}
+                        </div>
                       </div>
+
                       <span
-                        className={`text-xs font-semibold px-2 py-0.5 rounded ${
-                          order.status === "delivered"
-                            ? "bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300"
-                            : "bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200"
+                        className={`text-xs font-semibold shrink-0 ${
+                          dayOpen
+                            ? "text-emerald-700 dark:text-emerald-400"
+                            : "text-amber-700 dark:text-amber-300"
                         }`}
                       >
-                        {order.status === "delivered" ? "Delivered" : "Pending Delivery"}
+                        {dayOpen ? "Shift Open" : "Day Not Started"}
                       </span>
                     </div>
 
-                    <div className="text-xs space-y-1 bg-[#faf7f5] dark:bg-[#171413] p-2.5 rounded-xl border border-[#e6dfdb]/60 dark:border-[#3a3330]">
-                      {order.items.map((it, idx) => (
-                        <div key={idx} className="flex justify-between">
-                          <span>
-                            {it.qty}x {it.sku_name}
-                          </span>
-                          <span className="tabular-nums font-medium">
-                            PKR {(it.qty * it.price).toLocaleString()}
-                          </span>
-                        </div>
-                      ))}
-                      <div className="pt-1.5 border-t border-[#e6dfdb] dark:border-[#3a3330] flex justify-between font-bold">
-                        <span>Invoice Total</span>
-                        <span className="text-[#7a2e4a] dark:text-[#d77a9c] tabular-nums">
-                          PKR {order.total_amount.toLocaleString()}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="pt-1">
-                      {order.status === "pending_delivery" ? (
+                    <div className="pt-3 border-t border-[#e6dfdb]/60 dark:border-[#3a3330]">
+                      {!dayOpen ? (
                         <button
                           type="button"
-                          onClick={() => setSigningOrderId(order.id)}
-                          className="w-full py-2.5 rounded-xl bg-[#7a2e4a] text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-xs hover:opacity-95"
+                          onClick={() => setShowCheckInModal(true)}
+                          className="w-full h-12 rounded-xl bg-[#7a2e4a] text-white font-semibold text-sm flex items-center justify-center gap-2 shadow-xs hover:opacity-95 transition"
                         >
-                          <ShieldCheck className="w-4 h-4" />
-                          <span>Deliver & Capture Salon Signature</span>
+                          <CalendarCheck className="w-4 h-4" />
+                          <span>Check In & Count Bag Stock</span>
                         </button>
                       ) : (
-                        <div className="text-xs text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5">
-                          <Check className="w-4 h-4" />
-                          <span>Delivered {when(order.delivered_at || "")} with signed acknowledgement.</span>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-xs">
+                            <span className="text-[#6b625e] dark:text-[#a59b96]">Current Bag:</span>{" "}
+                            <strong className="text-sm tabular-nums text-[#1d1a19] dark:text-[#f2eeec]">
+                              {bagCount} units
+                            </strong>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setShowCheckOutModal(true)}
+                            className="px-3.5 py-2 rounded-xl border border-rose-300 dark:border-rose-900/60 text-rose-700 dark:text-rose-400 text-xs font-semibold hover:bg-rose-50 dark:hover:bg-rose-950/40"
+                          >
+                            End Day (Daily Close)
+                          </button>
                         </div>
                       )}
                     </div>
                   </div>
-                ))}
+
+                  {/* Rep Monthly Target Card */}
+                  <RepMonth stats={monthlyStats} />
+                </div>
+
+                {/* Quick Actions Grid */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("route")}
+                    className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-left hover:border-[#7a2e4a] transition-colors"
+                  >
+                    <div className="w-8 h-8 rounded-xl bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 flex items-center justify-center mb-2">
+                      <MapPin className="w-4 h-4" />
+                    </div>
+                    <div className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">Today's Route</div>
+                    <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                      {route.filter((r) => r.status === "pending").length} stops remaining
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("orders")}
+                    className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-left hover:border-[#7a2e4a] transition-colors"
+                  >
+                    <div className="w-8 h-8 rounded-xl bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 flex items-center justify-center mb-2">
+                      <Package className="w-4 h-4" />
+                    </div>
+                    <div className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">Deliveries</div>
+                    <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                      {orders.filter((o) => o.status === "pending_delivery").length} awaiting signature
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowNewSalonModal(true)}
+                    className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-left hover:border-[#7a2e4a] transition-colors"
+                  >
+                    <div className="w-8 h-8 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 flex items-center justify-center mb-2">
+                      <Plus className="w-4 h-4" />
+                    </div>
+                    <div className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">New Prospect</div>
+                    <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">Add salon offline</div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("outbox")}
+                    className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-left hover:border-[#7a2e4a] transition-colors"
+                  >
+                    <div className="w-8 h-8 rounded-xl bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 flex items-center justify-center mb-2">
+                      <Clock className="w-4 h-4" />
+                    </div>
+                    <div className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">Outbox Queue</div>
+                    <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                      {pendingItems.length} items waiting
+                    </div>
+                  </button>
+                </div>
               </div>
             )}
-          </div>
-        )}
 
-        {/* ================= TAB 5: OUTBOX INSPECTOR ================= */}
-        {activeTab === "outbox" && (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
-                  Offline Outbox Queue
-                </h2>
-                <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                  AES-GCM encrypted IndexedDB store (P1-09)
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={async () => {
-                  if (confirm("Wipe phone outbox queue and local session?")) {
-                    await wipeLocalData();
-                    setItems([]);
-                    showToast("Outbox queue wiped.", "warn");
-                  }
-                }}
-                className="px-2.5 py-1 text-xs text-rose-600 border border-rose-200 dark:border-rose-900 rounded-lg hover:bg-rose-50"
-              >
-                Wipe Local
-              </button>
-            </div>
-
-            {/* Offline Simulation Control Card */}
-            <div className="p-3.5 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-2">
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="font-bold text-xs">Simulated Network Disconnect</div>
-                  <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
-                    Toggle to test offline queueing without disabling actual device Wi-Fi
+            {/* ================= TAB 2: ROUTE ================= */}
+            {activeTab === "route" && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
+                      Today's Scheduled Route
+                    </h2>
+                    <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                      Karachi Central & South · {route.length} stops · Week 2 Cycle
+                    </p>
                   </div>
                 </div>
-                <input
-                  type="checkbox"
-                  checked={isOffline()}
-                  onChange={(e) => setSimulatedOffline(e.target.checked)}
-                  className="w-5 h-5 accent-[#7a2e4a] cursor-pointer"
-                />
-              </div>
 
-              {/* Quick Test Action Enqueuers */}
-              <div className="pt-2 border-t border-[#e6dfdb]/60 dark:border-[#3a3330] flex flex-wrap gap-2 text-xs">
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const id = `tst-${Date.now()}`;
-                    await submit({
-                      id,
-                      fn: "log_visit",
-                      args: { p_id: id, p_salon_id: "sal-clifton-01", p_notes: "Sample field visit" },
-                      label: "Test Field Visit",
-                      salonId: "sal-clifton-01",
-                      capturedAt: new Date().toISOString(),
-                    });
-                  }}
-                  className="px-2.5 py-1.5 rounded-lg bg-black/5 dark:bg-white/5 font-medium hover:bg-black/10"
-                >
-                  + Enqueue Visit
-                </button>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {route.map((stop) => (
+                    <div
+                      key={stop.id}
+                      className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs flex items-center justify-between gap-3"
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="w-7 h-7 rounded-full bg-[#7a2e4a] text-white font-bold text-xs flex items-center justify-center shrink-0 mt-0.5 tabular-nums">
+                          {stop.stop_number}
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
+                            {stop.salon_name}
+                          </h4>
+                          <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">{stop.area}</p>
+                          <div className="flex flex-wrap items-center gap-2 text-[11px] mt-1 text-[#6b625e] dark:text-[#a59b96]">
+                            <span className="capitalize">{stop.due_reason.replace("_", " ")}</span>
+                            <span>·</span>
+                            <span
+                              className={
+                                stop.status === "visited"
+                                  ? "text-emerald-700 dark:text-emerald-400 font-semibold"
+                                  : ""
+                              }
+                            >
+                              {stop.status === "visited" ? "Visited" : "Pending"}
+                            </span>
+                            {stop.balance > 0 && (
+                              <>
+                                <span>·</span>
+                                <span className="font-semibold text-rose-600 dark:text-rose-400 tabular-nums">
+                                  Due: PKR {stop.balance.toLocaleString()}
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
 
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const id = `tst-pay-${Date.now()}`;
-                    await submit({
-                      id,
-                      fn: "rep_record_payment",
-                      args: { p_id: id, p_salon_id: "sal-dha-02", p_amount: 5000 },
-                      label: "Test Payment PKR 5,000",
-                      salonId: "sal-dha-02",
-                      capturedAt: new Date().toISOString(),
-                    });
-                  }}
-                  className="px-2.5 py-1.5 rounded-lg bg-black/5 dark:bg-white/5 font-medium hover:bg-black/10"
-                >
-                  + Enqueue Cash PKR 5k
-                </button>
-
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const id = `ref-${Date.now()}`;
-                    await submit({
-                      id,
-                      fn: "rep_check_in",
-                      args: { p_id: id, p_bag_count: -1, p_fail: true },
-                      label: "Invalid Bag Count (Triggers Refusal)",
-                      salonId: null,
-                      capturedAt: new Date().toISOString(),
-                    });
-                  }}
-                  className="px-2.5 py-1.5 rounded-lg text-rose-700 bg-rose-50 dark:bg-rose-950/40 font-medium"
-                >
-                  + Test Refusal
-                </button>
-              </div>
-            </div>
-
-            {/* Queue Item List */}
-            <div className="space-y-2">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-[#6b625e]">
-                Queue Items ({items.length})
-              </h3>
-
-              {items.length === 0 ? (
-                <div className="p-8 rounded-2xl border border-dashed border-[#e6dfdb] dark:border-[#3a3330] text-center text-xs text-[#6b625e]">
-                  Outbox is clear. All captured actions have drained and synced to the database.
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedSalonId(stop.salon_id);
+                          setActiveTab("salons");
+                        }}
+                        className="px-3.5 py-2 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold hover:border-[#7a2e4a] text-[#7a2e4a] dark:text-[#d77a9c] shrink-0"
+                      >
+                        Open
+                      </button>
+                    </div>
+                  ))}
                 </div>
-              ) : (
-                items.map((item) => (
-                  <div
-                    key={item.id}
-                    className="p-3 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs text-xs space-y-1.5"
+
+                {/* Lost Demand Quick Capture */}
+                <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-300/40 text-xs space-y-2">
+                  <div className="font-bold text-amber-900 dark:text-amber-200 flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-600" />
+                    <span>Customer Asked for Unstocked Item? (Lost Demand)</span>
+                  </div>
+                  <p className="text-[#6b625e] dark:text-[#a59b96]">
+                    Tap below to record missed product requests directly to the demand ledger.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const id = `dem-${Date.now()}`;
+                      const res = await submit({
+                        id,
+                        fn: "record_demand",
+                        args: {
+                          p_id: id,
+                          p_sku_name: "Kiran Brazilian Keratin 1L",
+                          p_qty: 2,
+                          p_at_client: new Date().toISOString(),
+                        },
+                        label: "Lost Demand: 2x Keratin 1L",
+                        salonId: null,
+                        capturedAt: new Date().toISOString(),
+                      });
+                      showToast(
+                        res === "queued"
+                          ? "Lost demand queued offline."
+                          : "Lost demand captured for inventory planning.",
+                        "ok",
+                      );
+                    }}
+                    className="w-full md:w-auto px-4 py-2.5 rounded-xl bg-amber-600 text-white font-semibold text-xs hover:bg-amber-700"
                   >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1.5 font-bold text-[#1d1a19] dark:text-[#f2eeec]">
-                        <span>#{item.seq}</span>
-                        <span>{item.label}</span>
-                      </div>
-                      <span
-                        className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
-                          item.state === "pending"
-                            ? "bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200"
-                            : "bg-rose-100 dark:bg-rose-950/60 text-rose-900 dark:text-rose-200"
-                        }`}
-                      >
-                        {item.state}
-                      </span>
-                    </div>
+                    Log 2x Keratin 1L Request
+                  </button>
+                </div>
+              </div>
+            )}
 
-                    <div className="font-mono text-[10px] text-[#6b625e] dark:text-[#a59b96] truncate">
-                      RPC: app.{item.fn}() · Captured: {when(item.capturedAt)}
-                    </div>
+            {/* ================= TAB 3: SALONS (ROSTER & DETAIL) ================= */}
+            {activeTab === "salons" && (
+              <div className="space-y-4">
+                {selectedSalonId && currentSalon ? (
+                  <div className="space-y-4">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedSalonId(null)}
+                      className="flex items-center gap-1.5 text-xs font-semibold text-[#7a2e4a] dark:text-[#d77a9c] hover:underline"
+                    >
+                      <ArrowLeft className="w-3.5 h-3.5" />
+                      <span>Back to Salons Roster</span>
+                    </button>
 
-                    {item.error && (
-                      <div className="text-rose-600 bg-rose-50 dark:bg-rose-950/30 p-2 rounded text-[11px]">
-                        {item.error}
-                      </div>
-                    )}
-
-                    {outboxState.transmittingIds?.includes(item.id) && (
-                      <div className="space-y-1 py-1">
-                        <div className="flex items-center justify-between text-[10px] font-semibold text-[#7a2e4a] dark:text-[#d77a9c]">
-                          <span className="flex items-center gap-1">
-                            <RefreshCw className="w-3 h-3 animate-spin" />
-                            Transmitting to server...
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Salon Header Card */}
+                      <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <h3 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
+                              {currentSalon.name}
+                            </h3>
+                            <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                              {currentSalon.address}
+                            </p>
+                          </div>
+                          <span className="text-xs font-bold uppercase text-[#7a2e4a] dark:text-[#d77a9c] shrink-0">
+                            {currentSalon.stage}
                           </span>
-                          <span>{outboxState.activeProgress?.[item.id] ?? 50}%</span>
                         </div>
-                        <div className="w-full h-1.5 bg-[#e6dfdb] dark:bg-[#3a3330] rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-[#7a2e4a] dark:bg-[#d77a9c] transition-all duration-300 ease-out"
-                            style={{ width: `${outboxState.activeProgress?.[item.id] ?? 50}%` }}
-                          />
+
+                        <div className="pt-2.5 border-t border-[#e6dfdb]/60 dark:border-[#3a3330] grid grid-cols-2 gap-2 text-xs">
+                          <div>
+                            <span className="text-[#6b625e] dark:text-[#a59b96]">Contact:</span>{" "}
+                            <strong>{currentSalon.contact_person}</strong>
+                          </div>
+                          <div>
+                            <span className="text-[#6b625e] dark:text-[#a59b96]">Phone:</span>{" "}
+                            <a
+                              href={`tel:${currentSalon.phone}`}
+                              className="text-[#7a2e4a] dark:text-[#d77a9c] font-medium"
+                            >
+                              {currentSalon.phone}
+                            </a>
+                          </div>
+                          <div>
+                            <span className="text-[#6b625e] dark:text-[#a59b96]">Balance Due:</span>{" "}
+                            <strong className="text-rose-600 dark:text-rose-400 tabular-nums">
+                              PKR {currentSalon.outstanding_balance.toLocaleString()}
+                            </strong>
+                          </div>
+                          <div>
+                            <span className="text-[#6b625e] dark:text-[#a59b96]">Credit Limit:</span>{" "}
+                            <strong className="tabular-nums">
+                              PKR {currentSalon.credit_limit.toLocaleString()}
+                            </strong>
+                          </div>
+                        </div>
+
+                        {/* Field Action Buttons */}
+                        <div className="grid grid-cols-3 gap-2 pt-2">
+                          <button
+                            type="button"
+                            onClick={() => setShowVisitModal(true)}
+                            className="p-3 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-center hover:border-[#7a2e4a] flex flex-col items-center justify-center gap-1.5"
+                          >
+                            <UserCheck className="w-5 h-5 text-[#7a2e4a] dark:text-[#d77a9c]" />
+                            <span className="text-xs font-semibold">Log Visit</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setShowPaymentModal(true)}
+                            className="p-3 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-center hover:border-[#7a2e4a] flex flex-col items-center justify-center gap-1.5"
+                          >
+                            <Coins className="w-5 h-5 text-emerald-600" />
+                            <span className="text-xs font-semibold">Receive Cash</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setShowCardModal(true)}
+                            className="p-3 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-center hover:border-[#7a2e4a] flex flex-col items-center justify-center gap-1.5"
+                          >
+                            <FileText className="w-5 h-5 text-indigo-600" />
+                            <span className="text-xs font-semibold">Take Order</span>
+                          </button>
                         </div>
                       </div>
-                    )}
 
-                    <div className="pt-1 flex justify-end gap-2">
-                      <button
-                        type="button"
-                        onClick={() => discardItem(item.id)}
-                        disabled={outboxState.transmittingIds?.includes(item.id)}
-                        className="px-2 py-1 text-rose-600 hover:underline disabled:opacity-40"
-                      >
-                        Discard
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => retryItem(item.id)}
-                        disabled={outboxState.transmittingIds?.includes(item.id)}
-                        className="px-2.5 py-1 bg-[#7a2e4a] text-white rounded font-medium disabled:opacity-40 flex items-center gap-1"
-                      >
-                        {outboxState.transmittingIds?.includes(item.id) ? (
-                          <>
-                            <RefreshCw className="w-3 h-3 animate-spin" />
-                            <span>Transmitting...</span>
-                          </>
+                      {/* Live Activity History */}
+                      <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h4 className="font-bold text-sm">Salon Ledger & Visits</h4>
+                          <span className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                            Last visit: {currentSalon.last_visited_at ? when(currentSalon.last_visited_at) : "None"}
+                          </span>
+                        </div>
+
+                        {loadingActivity ? (
+                          <div className="py-6 text-center text-xs text-[#6b625e]">Loading history...</div>
+                        ) : !salonActivity ||
+                          (salonActivity.visits.length === 0 &&
+                            salonActivity.payments.length === 0 &&
+                            salonActivity.orderCards.length === 0) ? (
+                          <div className="py-6 text-center text-xs text-[#6b625e] dark:text-[#a59b96]">
+                            No synced visits, payments, or order cards for this salon yet.
+                          </div>
                         ) : (
-                          <span>Retry</span>
+                          <div className="divide-y divide-[#e6dfdb]/60 dark:divide-[#3a3330] text-xs max-h-64 overflow-y-auto">
+                            {salonActivity.payments.map((p) => (
+                              <div key={p.id} className="py-2 flex items-center justify-between gap-2">
+                                <div>
+                                  <div className="font-semibold text-emerald-700 dark:text-emerald-400">
+                                    Cash Payment
+                                  </div>
+                                  <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                                    {when(p.capturedAt)}
+                                  </div>
+                                </div>
+                                <span className="font-bold tabular-nums">
+                                  PKR {p.amount.toLocaleString()}
+                                </span>
+                              </div>
+                            ))}
+                            {salonActivity.orderCards.map((c) => (
+                              <div key={c.id} className="py-2 flex items-center justify-between gap-2">
+                                <div>
+                                  <div className="font-semibold">
+                                    Order Card: {c.qty}x {c.skuName}
+                                  </div>
+                                  <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                                    {when(c.capturedAt)} · {c.status.replace("_", " ")}
+                                  </div>
+                                </div>
+                                <span className="font-bold tabular-nums">
+                                  PKR {c.totalAmount.toLocaleString()}
+                                </span>
+                              </div>
+                            ))}
+                            {salonActivity.visits.map((v) => (
+                              <div key={v.id} className="py-2 space-y-0.5">
+                                <div className="font-semibold">
+                                  Field Visit {v.lat !== null ? `(${v.lat}, ${v.lng})` : ""}
+                                </div>
+                                {v.notes && (
+                                  <p className="text-[#6b625e] dark:text-[#a59b96]">{v.notes}</p>
+                                )}
+                                <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                                  {when(v.capturedAt)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
                         )}
-                      </button>
+                      </div>
                     </div>
                   </div>
-                ))
-              )}
-            </div>
-          </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <h2 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
+                          Salons Roster
+                        </h2>
+                        <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                          {filteredSalons.length} salons in Karachi territory
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setShowNewSalonModal(true)}
+                        className="px-3.5 py-2 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs whitespace-nowrap"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>New Prospect</span>
+                      </button>
+                    </div>
+
+                    <div className="flex flex-col md:flex-row gap-2.5 md:items-center md:justify-between">
+                      <div className="relative flex-1">
+                        <Search className="w-4 h-4 absolute left-3 top-3 text-[#6b625e]" />
+                        <input
+                          type="text"
+                          aria-label="Search salons"
+                          placeholder="Search salon name or area..."
+                          value={salonSearch}
+                          onChange={(e) => setSalonSearch(e.target.value)}
+                          className="w-full pl-9 pr-3 py-2 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-white dark:bg-[#211d1b]"
+                        />
+                      </div>
+
+                      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 text-xs">
+                        {(["all", "vip", "regular", "trial", "prospect"] as const).map((st) => (
+                          <button
+                            key={st}
+                            type="button"
+                            onClick={() => setSalonFilter(st)}
+                            className={`px-3 py-1.5 rounded-lg capitalize whitespace-nowrap transition-colors ${
+                              salonFilter === st
+                                ? "bg-[#7a2e4a] text-white font-semibold"
+                                : "bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-[#6b625e] dark:text-[#a59b96]"
+                            }`}
+                          >
+                            {st}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                      {filteredSalons.map((salon) => (
+                        <button
+                          key={salon.id}
+                          type="button"
+                          onClick={() => setSelectedSalonId(salon.id)}
+                          className="w-full text-left p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs hover:border-[#7a2e4a] transition-colors"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <h4 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
+                                {salon.name}
+                              </h4>
+                              <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                                {salon.area}
+                              </p>
+                            </div>
+                            <span className="text-[11px] font-bold uppercase text-[#7a2e4a] dark:text-[#d77a9c] shrink-0">
+                              {salon.stage}
+                            </span>
+                          </div>
+
+                          <div className="mt-2.5 pt-2 border-t border-[#e6dfdb]/60 dark:border-[#3a3330] flex items-center justify-between text-xs">
+                            <span className="text-[#6b625e] dark:text-[#a59b96]">
+                              {salon.contact_person}
+                            </span>
+                            {salon.outstanding_balance > 0 ? (
+                              <span className="font-semibold text-rose-600 dark:text-rose-400 tabular-nums">
+                                Due: PKR {salon.outstanding_balance.toLocaleString()}
+                              </span>
+                            ) : (
+                              <span className="text-emerald-700 dark:text-emerald-400 font-semibold">
+                                Cleared
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ================= TAB 3.5: PUBLIC SHOP (khsalon.com) ================= */}
+            {activeTab === "shop" && (
+              <StorefrontView
+                onOpenSalonOrderModal={(prodName) => {
+                  const targetSalon = salons[0]?.id || "sal-clifton-01";
+                  setSelectedSalonId(targetSalon);
+                  const matchedSku = skus.find((k) =>
+                    prodName.toLowerCase().includes(k.category.toLowerCase()) ||
+                    k.name.toLowerCase().includes(prodName.split(" ")[0].toLowerCase()),
+                  );
+                  if (matchedSku) setSelectedSkuId(matchedSku.id);
+                  setShowCardModal(true);
+                }}
+                showToast={showToast}
+              />
+            )}
+
+            {/* ================= TAB 4: ORDERS & DELIVERIES ================= */}
+            {activeTab === "orders" && (
+              <div className="space-y-4">
+                <div>
+                  <h2 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
+                    Deliveries & Customer Signatures
+                  </h2>
+                  <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                    Deliver goods with customer-signed digital acknowledgement
+                  </p>
+                </div>
+
+                {signingOrderId ? (
+                  <div className="max-w-lg p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
+                        Customer Signature
+                      </h3>
+                      <button
+                        type="button"
+                        aria-label="Cancel signature"
+                        onClick={() => setSigningOrderId(null)}
+                        className="p-1 text-[#6b625e]"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    {(() => {
+                      const ord = orders.find((o) => o.id === signingOrderId);
+                      return ord ? (
+                        <SignaturePad
+                          salonName={ord.salon_name}
+                          onCapture={handleConfirmDeliverySignature}
+                        />
+                      ) : null;
+                    })()}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {orders.map((order) => (
+                      <div
+                        key={order.id}
+                        className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-2.5 flex flex-col justify-between"
+                      >
+                        <div className="space-y-2.5">
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <span className="text-[11px] font-mono text-[#6b625e] dark:text-[#a59b96]">
+                                {order.order_number}
+                              </span>
+                              <h4 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
+                                {order.salon_name}
+                              </h4>
+                            </div>
+                            <span
+                              className={`text-xs font-semibold shrink-0 ${
+                                order.status === "delivered"
+                                  ? "text-emerald-700 dark:text-emerald-400"
+                                  : "text-amber-700 dark:text-amber-300"
+                              }`}
+                            >
+                              {order.status === "delivered" ? "Delivered" : "Pending Delivery"}
+                            </span>
+                          </div>
+
+                          <div className="text-xs space-y-1 bg-[#faf7f5] dark:bg-[#171413] p-3 rounded-xl border border-[#e6dfdb]/60 dark:border-[#3a3330]">
+                            {order.items.map((it, idx) => (
+                              <div key={idx} className="flex justify-between gap-2">
+                                <span>
+                                  {it.qty}x {it.sku_name}
+                                </span>
+                                <span className="tabular-nums font-medium shrink-0">
+                                  PKR {(it.qty * it.price).toLocaleString()}
+                                </span>
+                              </div>
+                            ))}
+                            <div className="pt-1.5 border-t border-[#e6dfdb] dark:border-[#3a3330] flex justify-between font-bold">
+                              <span>Invoice Total</span>
+                              <span className="text-[#7a2e4a] dark:text-[#d77a9c] tabular-nums">
+                                PKR {order.total_amount.toLocaleString()}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="pt-1">
+                          {order.status === "pending_delivery" ? (
+                            <button
+                              type="button"
+                              onClick={() => setSigningOrderId(order.id)}
+                              className="w-full py-2.5 rounded-xl bg-[#7a2e4a] text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-xs hover:opacity-95"
+                            >
+                              <ShieldCheck className="w-4 h-4" />
+                              <span>Deliver & Capture Salon Signature</span>
+                            </button>
+                          ) : (
+                            <div className="text-xs text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5">
+                              <Check className="w-4 h-4 shrink-0" />
+                              <span>
+                                Delivered {when(order.delivered_at || "")} with signed acknowledgement.
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ================= TAB 5: OUTBOX INSPECTOR ================= */}
+            {activeTab === "outbox" && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h2 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
+                      Offline Outbox Queue
+                    </h2>
+                    <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                      AES-GCM encrypted IndexedDB queue synced to backend RPCs
+                    </p>
+                  </div>
+
+                  {confirmWipe ? (
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await wipeLocalData();
+                          setItems([]);
+                          setConfirmWipe(false);
+                          showToast("Outbox queue wiped.", "warn");
+                        }}
+                        className="px-2.5 py-1.5 bg-rose-600 text-white rounded-lg font-semibold"
+                      >
+                        Confirm Wipe
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmWipe(false)}
+                        className="px-2.5 py-1.5 border border-[#e6dfdb] dark:border-[#3a3330] rounded-lg"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmWipe(true)}
+                      className="px-3 py-1.5 text-xs text-rose-600 border border-rose-200 dark:border-rose-900 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/30"
+                    >
+                      Wipe Local
+                    </button>
+                  )}
+                </div>
+
+                {/* Offline Simulation Control Card */}
+                <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <label htmlFor="sim-offline-toggle" className="font-bold text-xs cursor-pointer">
+                        Simulated Network Disconnect
+                      </label>
+                      <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                        Toggle to test offline queueing without disabling actual device Wi-Fi
+                      </div>
+                    </div>
+                    <input
+                      id="sim-offline-toggle"
+                      type="checkbox"
+                      checked={isOffline()}
+                      onChange={(e) => setSimulatedOffline(e.target.checked)}
+                      className="w-5 h-5 accent-[#7a2e4a] cursor-pointer"
+                    />
+                  </div>
+
+                  <div className="pt-2 border-t border-[#e6dfdb]/60 dark:border-[#3a3330] flex flex-wrap gap-2 text-xs">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const id = `tst-${Date.now()}`;
+                        await submit({
+                          id,
+                          fn: "log_visit",
+                          args: { p_id: id, p_salon_id: "sal-clifton-01", p_notes: "Sample field visit" },
+                          label: "Test Field Visit",
+                          salonId: "sal-clifton-01",
+                          capturedAt: new Date().toISOString(),
+                        });
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-black/5 dark:bg-white/5 font-medium hover:bg-black/10"
+                    >
+                      + Enqueue Visit
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const id = `tst-pay-${Date.now()}`;
+                        await submit({
+                          id,
+                          fn: "rep_record_payment",
+                          args: { p_id: id, p_salon_id: "sal-dha-02", p_amount: 5000 },
+                          label: "Test Payment PKR 5,000",
+                          salonId: "sal-dha-02",
+                          capturedAt: new Date().toISOString(),
+                        });
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-black/5 dark:bg-white/5 font-medium hover:bg-black/10"
+                    >
+                      + Enqueue Cash PKR 5k
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const id = `ref-${Date.now()}`;
+                        await submit({
+                          id,
+                          fn: "rep_check_in",
+                          args: { p_id: id, p_bag_count: -1, p_fail: true },
+                          label: "Invalid Bag Count (Triggers Refusal)",
+                          salonId: null,
+                          capturedAt: new Date().toISOString(),
+                        });
+                      }}
+                      className="px-3 py-1.5 rounded-lg text-rose-700 bg-rose-50 dark:bg-rose-950/40 font-medium"
+                    >
+                      + Test Refusal
+                    </button>
+                  </div>
+                </div>
+
+                {/* Queue Item List */}
+                <div className="space-y-2">
+                  <h3 className="text-xs font-semibold text-[#6b625e] dark:text-[#a59b96]">
+                    Queue Items ({items.length})
+                  </h3>
+
+                  {items.length === 0 ? (
+                    <div className="p-8 rounded-2xl border border-dashed border-[#e6dfdb] dark:border-[#3a3330] text-center text-xs text-[#6b625e] dark:text-[#a59b96]">
+                      Outbox is clear. All captured actions have drained and synced to the database.
+                    </div>
+                  ) : (
+                    items.map((item) => (
+                      <div
+                        key={item.id}
+                        className="p-3.5 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs text-xs space-y-1.5"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5 font-bold text-[#1d1a19] dark:text-[#f2eeec]">
+                            <span className="tabular-nums">#{item.seq}</span>
+                            <span>{item.label}</span>
+                          </div>
+                          <span
+                            className={`text-xs font-semibold uppercase ${
+                              item.state === "pending"
+                                ? "text-amber-700 dark:text-amber-300"
+                                : "text-rose-700 dark:text-rose-400"
+                            }`}
+                          >
+                            {item.state}
+                          </span>
+                        </div>
+
+                        <div className="font-mono text-[11px] text-[#6b625e] dark:text-[#a59b96] truncate">
+                          RPC: {item.fn} · Captured: {when(item.capturedAt)}
+                        </div>
+
+                        {item.error && (
+                          <div className="text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/30 p-2 rounded text-[11px]">
+                            {item.error}
+                          </div>
+                        )}
+
+                        {outboxState.transmittingIds?.includes(item.id) && (
+                          <div className="space-y-1 py-1">
+                            <div className="flex items-center justify-between text-[10px] font-semibold text-[#7a2e4a] dark:text-[#d77a9c]">
+                              <span className="flex items-center gap-1">
+                                <RefreshCw className="w-3 h-3 animate-spin" />
+                                Transmitting to server...
+                              </span>
+                              <span>{outboxState.activeProgress?.[item.id] ?? 50}%</span>
+                            </div>
+                            <div className="w-full h-1.5 bg-[#e6dfdb] dark:bg-[#3a3330] rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-[#7a2e4a] dark:bg-[#d77a9c] transition-all duration-300 ease-out"
+                                style={{ width: `${outboxState.activeProgress?.[item.id] ?? 50}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="pt-1 flex justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => discardItem(item.id)}
+                            disabled={outboxState.transmittingIds?.includes(item.id)}
+                            className="px-2.5 py-1 text-rose-600 hover:underline disabled:opacity-40"
+                          >
+                            Discard
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => retryItem(item.id)}
+                            disabled={outboxState.transmittingIds?.includes(item.id)}
+                            className="px-3 py-1 bg-[#7a2e4a] text-white rounded-lg font-medium disabled:opacity-40 flex items-center gap-1"
+                          >
+                            {outboxState.transmittingIds?.includes(item.id) ? (
+                              <>
+                                <RefreshCw className="w-3 h-3 animate-spin" />
+                                <span>Transmitting...</span>
+                              </>
+                            ) : (
+                              <span>Retry</span>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </>
         )}
       </main>
 
@@ -1217,8 +1516,11 @@ export default function App() {
               Count physical retail tubes, serums and shampoos in your shoulder bag before starting salon visits.
             </p>
             <div>
-              <label className="block text-xs font-semibold mb-1">Total Units Counted:</label>
+              <label htmlFor="checkin-bag-count" className="block text-xs font-semibold mb-1">
+                Total Units Counted:
+              </label>
               <input
+                id="checkin-bag-count"
                 type="number"
                 value={bagCount}
                 onChange={(e) => setBagCount(Number(e.target.value))}
@@ -1229,14 +1531,14 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setShowCheckInModal(false)}
-                className="flex-1 py-2 rounded-xl border border-[#e6dfdb] text-xs font-semibold"
+                className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={() => handleCheckIn(bagCount)}
-                className="flex-1 py-2 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold"
+                className="flex-1 py-2.5 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold"
               >
                 Confirm Check-In
               </button>
@@ -1256,8 +1558,11 @@ export default function App() {
               Count remaining unsold units in bag. Variance against deliveries and sales will be calculated automatically.
             </p>
             <div>
-              <label className="block text-xs font-semibold mb-1">Leftover Units Counted:</label>
+              <label htmlFor="checkout-bag-count" className="block text-xs font-semibold mb-1">
+                Leftover Units Counted:
+              </label>
               <input
+                id="checkout-bag-count"
                 type="number"
                 value={bagCount}
                 onChange={(e) => setBagCount(Number(e.target.value))}
@@ -1268,14 +1573,14 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setShowCheckOutModal(false)}
-                className="flex-1 py-2 rounded-xl border border-[#e6dfdb] text-xs font-semibold"
+                className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={() => handleCheckOut(bagCount)}
-                className="flex-1 py-2 rounded-xl bg-rose-600 text-white text-xs font-semibold hover:bg-rose-700"
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 text-white text-xs font-semibold hover:bg-rose-700"
               >
                 Close Day
               </button>
@@ -1292,8 +1597,11 @@ export default function App() {
               Log Visit: {currentSalon.name}
             </h3>
             <div>
-              <label className="block text-xs font-semibold mb-1">Visit Notes / Discussion:</label>
+              <label htmlFor="visit-notes" className="block text-xs font-semibold mb-1">
+                Visit Notes / Discussion:
+              </label>
               <textarea
+                id="visit-notes"
                 rows={3}
                 placeholder="Discussed keratin smoothing promo, owner interested in 500ml jars..."
                 value={visitNotes}
@@ -1305,16 +1613,16 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setShowVisitModal(false)}
-                className="flex-1 py-2 rounded-xl border border-[#e6dfdb] text-xs font-semibold"
+                className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={handleLogVisit}
-                className="flex-1 py-2 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold"
+                className="flex-1 py-2.5 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold"
               >
-                Save Visit (Offline)
+                Save Visit
               </button>
             </div>
           </div>
@@ -1329,33 +1637,38 @@ export default function App() {
               Collect Cash Payment
             </h3>
             <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-              Salon: <strong>{currentSalon.name}</strong> (Due: PKR {currentSalon.outstanding_balance.toLocaleString()})
+              Salon: <strong>{currentSalon.name}</strong> (Due: PKR{" "}
+              {currentSalon.outstanding_balance.toLocaleString()})
             </p>
             <div>
-              <label className="block text-xs font-semibold mb-1">Cash Amount (PKR):</label>
+              <label htmlFor="cash-amount" className="block text-xs font-semibold mb-1">
+                Cash Amount (PKR):
+              </label>
               <input
+                id="cash-amount"
                 type="number"
+                min={1}
                 placeholder="e.g. 15000"
                 value={paymentAmount}
                 onChange={(e) => setPaymentAmount(e.target.value)}
                 className="w-full p-2.5 text-base font-bold tabular-nums rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
               />
             </div>
-            <p className="text-[11px] text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 p-2 rounded-lg">
-              Saved on this phone; official SMS receipt dispatched automatically once synced with office.
+            <p className="text-[11px] text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 p-2.5 rounded-xl">
+              Saved on this phone; official ledger receipt recorded automatically once synced.
             </p>
             <div className="flex gap-2 pt-2">
               <button
                 type="button"
                 onClick={() => setShowPaymentModal(false)}
-                className="flex-1 py-2 rounded-xl border border-[#e6dfdb] text-xs font-semibold"
+                className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={handleRecordPayment}
-                className="flex-1 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700"
+                className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700"
               >
                 Accept PKR Cash
               </button>
@@ -1371,9 +1684,15 @@ export default function App() {
             <h3 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
               Create Order Intake Card
             </h3>
+            <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+              For: <strong>{currentSalon.name}</strong>
+            </p>
             <div>
-              <label className="block text-xs font-semibold mb-1">Select Product SKU:</label>
+              <label htmlFor="order-sku" className="block text-xs font-semibold mb-1">
+                Select Product SKU:
+              </label>
               <select
+                id="order-sku"
                 value={selectedSkuId}
                 onChange={(e) => setSelectedSkuId(e.target.value)}
                 className="w-full p-2.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
@@ -1386,27 +1705,30 @@ export default function App() {
               </select>
             </div>
             <div>
-              <label className="block text-xs font-semibold mb-1">Quantity:</label>
+              <label htmlFor="order-qty" className="block text-xs font-semibold mb-1">
+                Quantity:
+              </label>
               <input
+                id="order-qty"
                 type="number"
-                min="1"
+                min={1}
                 value={cardQty}
                 onChange={(e) => setCardQty(Math.max(1, Number(e.target.value)))}
-                className="w-full p-2 text-sm font-bold tabular-nums rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+                className="w-full p-2.5 text-sm font-bold tabular-nums rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
               />
             </div>
             <div className="flex gap-2 pt-2">
               <button
                 type="button"
                 onClick={() => setShowCardModal(false)}
-                className="flex-1 py-2 rounded-xl border border-[#e6dfdb] text-xs font-semibold"
+                className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={handleCreateCard}
-                className="flex-1 py-2 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold"
+                className="flex-1 py-2.5 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold"
               >
                 Create Card
               </button>
@@ -1423,22 +1745,28 @@ export default function App() {
               Register New Salon Prospect
             </h3>
             <div>
-              <label className="block text-xs font-semibold mb-1">Salon Name:</label>
+              <label htmlFor="new-salon-name" className="block text-xs font-semibold mb-1">
+                Salon Name:
+              </label>
               <input
+                id="new-salon-name"
                 type="text"
                 placeholder="e.g. Elegance Hair Lounge"
                 value={newSalonName}
                 onChange={(e) => setNewSalonName(e.target.value)}
-                className="w-full p-2 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+                className="w-full p-2.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold mb-1">Area / Karachi Zone:</label>
+              <label htmlFor="new-salon-area" className="block text-xs font-semibold mb-1">
+                Area / Karachi Zone:
+              </label>
               <input
+                id="new-salon-area"
                 type="text"
                 value={newSalonArea}
                 onChange={(e) => setNewSalonArea(e.target.value)}
-                className="w-full p-2 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+                className="w-full p-2.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
               />
             </div>
             <div>
@@ -1446,17 +1774,19 @@ export default function App() {
               <div className="grid grid-cols-2 gap-2">
                 <input
                   type="text"
+                  aria-label="Contact person"
                   placeholder="Owner name"
                   value={newSalonContact}
                   onChange={(e) => setNewSalonContact(e.target.value)}
-                  className="w-full p-2 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+                  className="w-full p-2.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
                 />
                 <input
                   type="text"
+                  aria-label="Phone number"
                   placeholder="0300-..."
                   value={newSalonPhone}
                   onChange={(e) => setNewSalonPhone(e.target.value)}
-                  className="w-full p-2 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+                  className="w-full p-2.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
                 />
               </div>
             </div>
@@ -1464,14 +1794,14 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setShowNewSalonModal(false)}
-                className="flex-1 py-2 rounded-xl border border-[#e6dfdb] text-xs font-semibold"
+                className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={handleCreateSalon}
-                className="flex-1 py-2 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold"
+                className="flex-1 py-2.5 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold"
               >
                 Save Prospect
               </button>
@@ -1480,12 +1810,14 @@ export default function App() {
         </div>
       )}
 
-      {/* Fixed Bottom Navigation Anchor */}
-      <BottomNavigation
-        activeTab={activeTab}
-        onSelectTab={setActiveTab}
-        pendingCount={pendingItems.length}
-      />
+      {/* Fixed Bottom Navigation Anchor (Field Rep mode) */}
+      {workspaceMode === "rep" && (
+        <BottomNavigation
+          activeTab={activeTab}
+          onSelectTab={setActiveTab}
+          pendingCount={pendingItems.length}
+        />
+      )}
     </div>
   );
 }
