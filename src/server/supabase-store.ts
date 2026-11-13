@@ -726,6 +726,37 @@ export class SupabaseKiranRepository implements KiranRepository {
         if (updateError) throw this.wrapDbError(updateError);
         return { ok: true, message: `Order ${String(order.order_number)} marked as delivered.` };
       }
+
+      case "mark_deliveries_delivered": {
+        const uniqueIds = Array.from(new Set(input.ids.filter((id) => typeof id === "string" && id.trim())));
+        if (uniqueIds.length === 0) {
+          throw new RpcError("No delivery order IDs provided.", 400, "22023");
+        }
+        const { data: orders, error: fetchError } = await this.client
+          .from("delivery_orders")
+          .select("id, status")
+          .in("id", uniqueIds);
+        if (fetchError) throw this.wrapDbError(fetchError);
+        if (!orders || orders.length === 0) {
+          throw new RpcError("No matching delivery orders found.", 404, "P0002");
+        }
+        const pendingIds = orders.filter((o) => o.status !== "delivered").map((o) => String(o.id));
+        if (pendingIds.length === 0) {
+          return { ok: true, message: "Selected orders are already marked as delivered." };
+        }
+        const { error: updateError } = await this.client
+          .from("delivery_orders")
+          .update({ status: "delivered", delivered_at: new Date().toISOString() })
+          .in("id", pendingIds);
+        if (updateError) throw this.wrapDbError(updateError);
+        return {
+          ok: true,
+          message:
+            pendingIds.length === 1
+              ? "1 order marked as delivered."
+              : `${pendingIds.length} orders marked as delivered.`,
+        };
+      }
     }
   }
 

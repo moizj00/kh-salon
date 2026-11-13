@@ -38,7 +38,9 @@ import { registerServiceWorker } from "./lib/register-sw";
 import { when } from "./lib/time";
 import { AuthGate } from "./components/auth-gate";
 import {
+  ConfirmBulkDeliveredModal,
   ConfirmDeliveredModal,
+  DeliveryBulkBar,
   DeliveryQuickActionsMenu,
   DeliveryReceiptModal,
 } from "./components/delivery-actions";
@@ -132,9 +134,13 @@ export default function App() {
   const [newSalonContact, setNewSalonContact] = useState("");
   const [confirmWipe, setConfirmWipe] = useState(false);
 
-  // Delivery order signing, filtering & Quick Actions
+  // Delivery order signing, search, filtering & Quick Actions
   const [signingOrderId, setSigningOrderId] = useState<string | null>(null);
+  const [deliverySearch, setDeliverySearch] = useState("");
   const [deliveryFilter, setDeliveryFilter] = useState<"all" | "pending_delivery" | "delivered">("all");
+  const [selectedDeliveryIds, setSelectedDeliveryIds] = useState<string[]>([]);
+  const [bulkConfirmOrders, setBulkConfirmOrders] = useState<DeliveryOrderFull[]>([]);
+  const [markingBulkDelivered, setMarkingBulkDelivered] = useState(false);
   const [openActionMenuOrderId, setOpenActionMenuOrderId] = useState<string | null>(null);
   const [receiptOrder, setReceiptOrder] = useState<DeliveryOrderFull | null>(null);
   const [confirmDeliverOrder, setConfirmDeliverOrder] = useState<DeliveryOrderFull | null>(null);
@@ -634,6 +640,7 @@ export default function App() {
           o.id === order.id ? { ...o, status: "delivered", delivered_at: new Date().toISOString() } : o,
         ),
       );
+      setSelectedDeliveryIds((prev) => prev.filter((id) => id !== order.id));
       setConfirmDeliverOrder(null);
       showToast(res.message, "ok");
       void refreshBootstrap();
@@ -644,6 +651,34 @@ export default function App() {
       );
     } finally {
       setMarkingDelivered(false);
+    }
+  };
+
+  const handleConfirmBulkMarkDelivered = async (targetOrders: DeliveryOrderFull[]) => {
+    const ids = targetOrders.map((o) => o.id);
+    if (ids.length === 0) return;
+    setMarkingBulkDelivered(true);
+    try {
+      const res = await submitManagerApproval({
+        action: "mark_deliveries_delivered",
+        ids,
+      });
+      const idSet = new Set(ids);
+      const now = new Date().toISOString();
+      setOrders((prev) =>
+        prev.map((o) => (idSet.has(o.id) ? { ...o, status: "delivered", delivered_at: now } : o)),
+      );
+      setSelectedDeliveryIds((prev) => prev.filter((id) => !idSet.has(id)));
+      setBulkConfirmOrders([]);
+      showToast(res.message, "ok");
+      void refreshBootstrap();
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : "Failed to update selected delivery orders.",
+        "warn",
+      );
+    } finally {
+      setMarkingBulkDelivered(false);
     }
   };
 
@@ -1333,13 +1368,66 @@ export default function App() {
             {activeTab === "orders" && (
               <div className="space-y-4">
                 {(() => {
-                  const allCount = orders.length;
-                  const pendingCount = orders.filter((o) => o.status === "pending_delivery").length;
-                  const deliveredCount = orders.filter((o) => o.status === "delivered").length;
+                  const query = deliverySearch.trim().toLowerCase();
+                  const searchedOrders = query
+                    ? orders.filter(
+                        (o) =>
+                          o.order_number.toLowerCase().includes(query) ||
+                          o.id.toLowerCase().includes(query) ||
+                          o.salon_name.toLowerCase().includes(query),
+                      )
+                    : orders;
+
+                  const allCount = searchedOrders.length;
+                  const pendingCount = searchedOrders.filter(
+                    (o) => o.status === "pending_delivery",
+                  ).length;
+                  const deliveredCount = searchedOrders.filter(
+                    (o) => o.status === "delivered",
+                  ).length;
                   const filteredOrders =
                     deliveryFilter === "all"
-                      ? orders
-                      : orders.filter((o) => o.status === deliveryFilter);
+                      ? searchedOrders
+                      : searchedOrders.filter((o) => o.status === deliveryFilter);
+
+                  const isManager = user.role === "manager";
+                  const visiblePendingOrders = filteredOrders.filter(
+                    (o) => o.status === "pending_delivery",
+                  );
+                  const visiblePendingIds = visiblePendingOrders.map((o) => o.id);
+                  const pendingOrderIdSet = new Set(
+                    orders.filter((o) => o.status === "pending_delivery").map((o) => o.id),
+                  );
+                  const activeSelectedIds = selectedDeliveryIds.filter((id) =>
+                    pendingOrderIdSet.has(id),
+                  );
+                  const activeSelectedSet = new Set(activeSelectedIds);
+                  const allVisiblePendingSelected =
+                    visiblePendingIds.length > 0 &&
+                    visiblePendingIds.every((id) => activeSelectedSet.has(id));
+                  const someVisiblePendingSelected = visiblePendingIds.some((id) =>
+                    activeSelectedSet.has(id),
+                  );
+
+                  const toggleSelectOrder = (orderId: string) => {
+                    setSelectedDeliveryIds((prev) =>
+                      prev.includes(orderId)
+                        ? prev.filter((id) => id !== orderId)
+                        : [...prev, orderId],
+                    );
+                  };
+
+                  const toggleSelectAllVisiblePending = () => {
+                    if (visiblePendingIds.length === 0) return;
+                    if (allVisiblePendingSelected) {
+                      const visibleSet = new Set(visiblePendingIds);
+                      setSelectedDeliveryIds((prev) => prev.filter((id) => !visibleSet.has(id)));
+                    } else {
+                      setSelectedDeliveryIds((prev) =>
+                        Array.from(new Set([...prev, ...visiblePendingIds])),
+                      );
+                    }
+                  };
 
                   return (
                     <>
@@ -1384,6 +1472,52 @@ export default function App() {
                         )}
                       </div>
 
+                      {!signingOrderId && (
+                        <div className="space-y-2.5">
+                          <div className="relative">
+                            <Search className="w-4 h-4 absolute left-3 top-3 text-[#6b625e]" />
+                            <input
+                              type="text"
+                              aria-label="Search deliveries"
+                              placeholder="Search order ID or salon name..."
+                              value={deliverySearch}
+                              onChange={(e) => setDeliverySearch(e.target.value)}
+                              className="w-full min-h-[40px] pl-9 pr-9 py-2 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-white dark:bg-[#211d1b] text-[#1d1a19] dark:text-[#f2eeec]"
+                            />
+                            {deliverySearch && (
+                              <button
+                                type="button"
+                                aria-label="Clear delivery search"
+                                onClick={() => setDeliverySearch("")}
+                                className="absolute right-2 top-1.5 p-1.5 rounded-lg text-[#6b625e] hover:text-[#1d1a19] dark:hover:text-white"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+
+                          {isManager && (
+                            <DeliveryBulkBar
+                              checkboxId="rep-deliveries-select-all"
+                              visiblePendingCount={visiblePendingIds.length}
+                              selectedCount={activeSelectedIds.length}
+                              allVisiblePendingSelected={allVisiblePendingSelected}
+                              someVisiblePendingSelected={someVisiblePendingSelected}
+                              onToggleSelectAll={toggleSelectAllVisiblePending}
+                              onMarkSelectedDelivered={() =>
+                                setBulkConfirmOrders(
+                                  orders.filter(
+                                    (o) =>
+                                      o.status === "pending_delivery" &&
+                                      activeSelectedSet.has(o.id),
+                                  ),
+                                )
+                              }
+                            />
+                          )}
+                        </div>
+                      )}
+
                       {signingOrderId ? (
                         <div className="max-w-lg p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-3">
                           <div className="flex items-center justify-between">
@@ -1413,67 +1547,104 @@ export default function App() {
                       ) : filteredOrders.length === 0 ? (
                         <div className="p-8 rounded-2xl bg-white dark:bg-[#211d1b] border border-dashed border-[#e6dfdb] dark:border-[#3a3330] text-center space-y-2.5">
                           <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                            {deliveryFilter === "delivered"
-                              ? "No delivered orders yet."
-                              : deliveryFilter === "pending_delivery"
-                                ? "No pending delivery orders."
-                                : "No delivery orders available."}
+                            {query
+                              ? `No delivery orders matching "${deliverySearch.trim()}".`
+                              : deliveryFilter === "delivered"
+                                ? "No delivered orders yet."
+                                : deliveryFilter === "pending_delivery"
+                                  ? "No pending delivery orders."
+                                  : "No delivery orders available."}
                           </p>
-                          {deliveryFilter !== "all" && (
-                            <button
-                              type="button"
-                              onClick={() => setDeliveryFilter("all")}
-                              className="px-3.5 py-2 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold hover:border-[#7a2e4a]"
-                            >
-                              Show All Orders
-                            </button>
-                          )}
+                          <div className="flex items-center justify-center gap-2">
+                            {query && (
+                              <button
+                                type="button"
+                                onClick={() => setDeliverySearch("")}
+                                className="px-3.5 py-2 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold hover:border-[#7a2e4a]"
+                              >
+                                Clear Search
+                              </button>
+                            )}
+                            {deliveryFilter !== "all" && (
+                              <button
+                                type="button"
+                                onClick={() => setDeliveryFilter("all")}
+                                className="px-3.5 py-2 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold hover:border-[#7a2e4a]"
+                              >
+                                Show All Orders
+                              </button>
+                            )}
+                          </div>
                         </div>
                       ) : (
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                          {filteredOrders.map((order) => (
-                            <div
-                              key={order.id}
-                              className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-2.5 flex flex-col justify-between"
-                            >
-                              <div className="space-y-2.5">
-                                <div className="flex items-start justify-between gap-2">
-                                  <div className="min-w-0">
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                      <span className="text-[11px] font-mono text-[#6b625e] dark:text-[#a59b96]">
-                                        {order.order_number}
-                                      </span>
-                                      <span
-                                        className={`text-xs font-semibold shrink-0 ${
-                                          order.status === "delivered"
-                                            ? "text-emerald-700 dark:text-emerald-400"
-                                            : "text-amber-700 dark:text-amber-300"
-                                        }`}
-                                      >
-                                        {order.status === "delivered" ? "Delivered" : "Pending Delivery"}
-                                      </span>
+                          {filteredOrders.map((order) => {
+                            const isPending = order.status === "pending_delivery";
+                            const isSelected = isPending && activeSelectedSet.has(order.id);
+                            return (
+                              <div
+                                key={order.id}
+                                className={`p-4 rounded-2xl bg-white dark:bg-[#211d1b] border shadow-xs space-y-2.5 flex flex-col justify-between transition-colors ${
+                                  isSelected
+                                    ? "border-[#7a2e4a] dark:border-[#d77a9c]"
+                                    : "border-[#e6dfdb] dark:border-[#3a3330]"
+                                }`}
+                              >
+                                <div className="space-y-2.5">
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="flex items-start gap-2 min-w-0">
+                                      {isManager && isPending && (
+                                        <label
+                                          aria-label={`Select order ${order.order_number}`}
+                                          className="min-h-[36px] min-w-[28px] -ml-1 flex items-center justify-center cursor-pointer shrink-0"
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={isSelected}
+                                            onChange={() => toggleSelectOrder(order.id)}
+                                            className="w-4 h-4 rounded accent-[#7a2e4a] cursor-pointer"
+                                          />
+                                        </label>
+                                      )}
+                                      <div className="min-w-0">
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <span className="text-[11px] font-mono text-[#6b625e] dark:text-[#a59b96]">
+                                            {order.order_number}
+                                          </span>
+                                          <span
+                                            className={`text-xs font-semibold shrink-0 ${
+                                              order.status === "delivered"
+                                                ? "text-emerald-700 dark:text-emerald-400"
+                                                : "text-amber-700 dark:text-amber-300"
+                                            }`}
+                                          >
+                                            {order.status === "delivered"
+                                              ? "Delivered"
+                                              : "Pending Delivery"}
+                                          </span>
+                                        </div>
+                                        <h4 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec] mt-0.5 truncate">
+                                          {order.salon_name}
+                                        </h4>
+                                      </div>
                                     </div>
-                                    <h4 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec] mt-0.5 truncate">
-                                      {order.salon_name}
-                                    </h4>
-                                  </div>
 
-                                  <DeliveryQuickActionsMenu
-                                    order={order}
-                                    isOpen={openActionMenuOrderId === order.id}
-                                    onToggle={() =>
-                                      setOpenActionMenuOrderId((prev) =>
-                                        prev === order.id ? null : order.id,
-                                      )
-                                    }
-                                    onClose={() => setOpenActionMenuOrderId(null)}
-                                    onViewReceipt={(o) => setReceiptOrder(o)}
-                                    onResendNotification={handleResendDeliveryNotification}
-                                    onRequestMarkDelivered={(o) => setConfirmDeliverOrder(o)}
-                                    canMarkDelivered={user.role === "manager"}
-                                    isNotifying={notifyingOrderId === order.id}
-                                  />
-                                </div>
+                                    <DeliveryQuickActionsMenu
+                                      order={order}
+                                      isOpen={openActionMenuOrderId === order.id}
+                                      onToggle={() =>
+                                        setOpenActionMenuOrderId((prev) =>
+                                          prev === order.id ? null : order.id,
+                                        )
+                                      }
+                                      onClose={() => setOpenActionMenuOrderId(null)}
+                                      onViewReceipt={(o) => setReceiptOrder(o)}
+                                      onResendNotification={handleResendDeliveryNotification}
+                                      onRequestMarkDelivered={(o) => setConfirmDeliverOrder(o)}
+                                      canMarkDelivered={isManager}
+                                      isNotifying={notifyingOrderId === order.id}
+                                    />
+                                  </div>
 
                                 <div className="text-xs space-y-1 bg-[#faf7f5] dark:bg-[#171413] p-3 rounded-xl border border-[#e6dfdb]/60 dark:border-[#3a3330]">
                                   {order.items.map((it, idx) => (
@@ -1517,8 +1688,9 @@ export default function App() {
                                   </div>
                                 )}
                               </div>
-                            </div>
-                          ))}
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
                     </>
@@ -2123,6 +2295,13 @@ export default function App() {
         isSubmitting={markingDelivered}
         onCancel={() => setConfirmDeliverOrder(null)}
         onConfirm={handleConfirmMarkDelivered}
+      />
+
+      <ConfirmBulkDeliveredModal
+        orders={bulkConfirmOrders}
+        isSubmitting={markingBulkDelivered}
+        onCancel={() => setBulkConfirmOrders([])}
+        onConfirm={handleConfirmBulkMarkDelivered}
       />
 
       {/* Fixed Bottom Navigation Anchor (Field Rep mode) */}

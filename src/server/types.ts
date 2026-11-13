@@ -155,7 +155,8 @@ export type ManagerApprovalAction =
   | { action: "approve_shift"; id: string }
   | { action: "flag_shift"; id: string }
   | { action: "update_shop_order_status"; id: string; status: "pending" | "confirmed" | "dispatched" }
-  | { action: "mark_delivery_delivered"; id: string };
+  | { action: "mark_delivery_delivered"; id: string }
+  | { action: "mark_deliveries_delivered"; ids: string[] };
 
 export interface DeliveryNotificationResult {
   ok: true;

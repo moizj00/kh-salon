@@ -21,7 +21,9 @@ import type {
   UserRole,
 } from "../server/types";
 import {
+  ConfirmBulkDeliveredModal,
   ConfirmDeliveredModal,
+  DeliveryBulkBar,
   DeliveryQuickActionsMenu,
   DeliveryReceiptModal,
 } from "./delivery-actions";
@@ -47,7 +49,11 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [salonQuery, setSalonQuery] = useState("");
   const [showBulkImport, setShowBulkImport] = useState(false);
+  const [deliverySearch, setDeliverySearch] = useState("");
   const [deliveryFilter, setDeliveryFilter] = useState<"all" | "pending_delivery" | "delivered">("all");
+  const [selectedDeliveryIds, setSelectedDeliveryIds] = useState<string[]>([]);
+  const [bulkConfirmOrders, setBulkConfirmOrders] = useState<DeliveryOrderFull[]>([]);
+  const [markingBulkDelivered, setMarkingBulkDelivered] = useState(false);
   const [openActionMenuOrderId, setOpenActionMenuOrderId] = useState<string | null>(null);
   const [receiptOrder, setReceiptOrder] = useState<DeliveryOrderFull | null>(null);
   const [confirmDeliverOrder, setConfirmDeliverOrder] = useState<DeliveryOrderFull | null>(null);
@@ -72,7 +78,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   }, []);
 
   const runAction = async (action: ManagerApprovalAction) => {
-    setBusyId(action.id);
+    setBusyId("id" in action ? action.id : action.ids[0] ?? null);
     try {
       const res = await submitManagerApproval(action);
       showToast(res.message, "ok");
@@ -105,6 +111,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
         id: order.id,
       });
       setConfirmDeliverOrder(null);
+      setSelectedDeliveryIds((prev) => prev.filter((id) => id !== order.id));
       showToast(res.message, "ok");
       await load();
       onApprovedChange?.();
@@ -112,6 +119,31 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
       showToast(err instanceof Error ? err.message : "Failed to update delivery status.", "warn");
     } finally {
       setMarkingDelivered(false);
+    }
+  };
+
+  const handleConfirmBulkMarkDelivered = async (targetOrders: DeliveryOrderFull[]) => {
+    const ids = targetOrders.map((o) => o.id);
+    if (ids.length === 0) return;
+    setMarkingBulkDelivered(true);
+    try {
+      const res = await submitManagerApproval({
+        action: "mark_deliveries_delivered",
+        ids,
+      });
+      const idSet = new Set(ids);
+      setSelectedDeliveryIds((prev) => prev.filter((id) => !idSet.has(id)));
+      setBulkConfirmOrders([]);
+      showToast(res.message, "ok");
+      await load();
+      onApprovedChange?.();
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : "Failed to update selected delivery orders.",
+        "warn",
+      );
+    } finally {
+      setMarkingBulkDelivered(false);
     }
   };
 
@@ -663,17 +695,65 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
           {/* Rep Delivery Orders */}
           <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
             {(() => {
-              const allCount = data.deliveryOrders.length;
-              const pendingCount = data.deliveryOrders.filter(
+              const query = deliverySearch.trim().toLowerCase();
+              const searchedDeliveries = query
+                ? data.deliveryOrders.filter(
+                    (o) =>
+                      o.order_number.toLowerCase().includes(query) ||
+                      o.id.toLowerCase().includes(query) ||
+                      o.salon_name.toLowerCase().includes(query),
+                  )
+                : data.deliveryOrders;
+
+              const allCount = searchedDeliveries.length;
+              const pendingCount = searchedDeliveries.filter(
                 (o) => o.status === "pending_delivery",
               ).length;
-              const deliveredCount = data.deliveryOrders.filter(
+              const deliveredCount = searchedDeliveries.filter(
                 (o) => o.status === "delivered",
               ).length;
               const filteredDeliveries =
                 deliveryFilter === "all"
-                  ? data.deliveryOrders
-                  : data.deliveryOrders.filter((o) => o.status === deliveryFilter);
+                  ? searchedDeliveries
+                  : searchedDeliveries.filter((o) => o.status === deliveryFilter);
+
+              const isManager = userRole === "manager";
+              const visiblePendingIds = filteredDeliveries
+                .filter((o) => o.status === "pending_delivery")
+                .map((o) => o.id);
+              const pendingIdSet = new Set(
+                data.deliveryOrders
+                  .filter((o) => o.status === "pending_delivery")
+                  .map((o) => o.id),
+              );
+              const activeSelectedIds = selectedDeliveryIds.filter((id) => pendingIdSet.has(id));
+              const activeSelectedSet = new Set(activeSelectedIds);
+              const allVisiblePendingSelected =
+                visiblePendingIds.length > 0 &&
+                visiblePendingIds.every((id) => activeSelectedSet.has(id));
+              const someVisiblePendingSelected = visiblePendingIds.some((id) =>
+                activeSelectedSet.has(id),
+              );
+
+              const toggleSelectOrder = (orderId: string) => {
+                setSelectedDeliveryIds((prev) =>
+                  prev.includes(orderId)
+                    ? prev.filter((id) => id !== orderId)
+                    : [...prev, orderId],
+                );
+              };
+
+              const toggleSelectAllVisiblePending = () => {
+                if (visiblePendingIds.length === 0) return;
+                if (allVisiblePendingSelected) {
+                  const visibleSet = new Set(visiblePendingIds);
+                  setSelectedDeliveryIds((prev) => prev.filter((id) => !visibleSet.has(id)));
+                } else {
+                  setSelectedDeliveryIds((prev) =>
+                    Array.from(new Set([...prev, ...visiblePendingIds])),
+                  );
+                }
+              };
 
               return (
                 <>
@@ -714,78 +794,158 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                     </div>
                   </div>
 
-                  {filteredDeliveries.length === 0 ? (
-                    <div className="py-8 text-center text-xs text-[#6b625e] dark:text-[#a59b96] space-y-2">
-                      <p>
-                        {deliveryFilter === "delivered"
-                          ? "No delivered orders yet."
-                          : deliveryFilter === "pending_delivery"
-                            ? "No pending delivery orders."
-                            : "No delivery orders available."}
-                      </p>
-                      {deliveryFilter !== "all" && (
+                  <div className="space-y-2.5">
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 absolute left-3 top-3 text-[#6b625e]" />
+                      <input
+                        type="text"
+                        aria-label="Search salon delivery ledger"
+                        placeholder="Search order ID or salon name..."
+                        value={deliverySearch}
+                        onChange={(e) => setDeliverySearch(e.target.value)}
+                        className="w-full min-h-[38px] pl-8 pr-8 py-1.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+                      />
+                      {deliverySearch && (
                         <button
                           type="button"
-                          onClick={() => setDeliveryFilter("all")}
-                          className="px-3 py-1.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold hover:border-[#7a2e4a]"
+                          aria-label="Clear ledger delivery search"
+                          onClick={() => setDeliverySearch("")}
+                          className="absolute right-1.5 top-1.5 p-1 rounded-lg text-[#6b625e] hover:text-[#1d1a19] dark:hover:text-white"
                         >
-                          Show All Orders
+                          <X className="w-3.5 h-3.5" />
                         </button>
                       )}
                     </div>
+
+                    {isManager && (
+                      <DeliveryBulkBar
+                        checkboxId="manager-ledger-select-all"
+                        visiblePendingCount={visiblePendingIds.length}
+                        selectedCount={activeSelectedIds.length}
+                        allVisiblePendingSelected={allVisiblePendingSelected}
+                        someVisiblePendingSelected={someVisiblePendingSelected}
+                        onToggleSelectAll={toggleSelectAllVisiblePending}
+                        onMarkSelectedDelivered={() =>
+                          setBulkConfirmOrders(
+                            data.deliveryOrders.filter(
+                              (o) =>
+                                o.status === "pending_delivery" && activeSelectedSet.has(o.id),
+                            ),
+                          )
+                        }
+                      />
+                    )}
+                  </div>
+
+                  {filteredDeliveries.length === 0 ? (
+                    <div className="py-8 text-center text-xs text-[#6b625e] dark:text-[#a59b96] space-y-2">
+                      <p>
+                        {query
+                          ? `No delivery orders matching "${deliverySearch.trim()}".`
+                          : deliveryFilter === "delivered"
+                            ? "No delivered orders yet."
+                            : deliveryFilter === "pending_delivery"
+                              ? "No pending delivery orders."
+                              : "No delivery orders available."}
+                      </p>
+                      <div className="flex items-center justify-center gap-2">
+                        {query && (
+                          <button
+                            type="button"
+                            onClick={() => setDeliverySearch("")}
+                            className="px-3 py-1.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold hover:border-[#7a2e4a]"
+                          >
+                            Clear Search
+                          </button>
+                        )}
+                        {deliveryFilter !== "all" && (
+                          <button
+                            type="button"
+                            onClick={() => setDeliveryFilter("all")}
+                            className="px-3 py-1.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold hover:border-[#7a2e4a]"
+                          >
+                            Show All Orders
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   ) : (
                     <div className="divide-y divide-[#e6dfdb]/60 dark:divide-[#3a3330] text-xs">
-                      {filteredDeliveries.map((ord) => (
-                        <div key={ord.id} className="py-3 first:pt-0 last:pb-0 flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="font-mono text-[11px] text-[#6b625e] dark:text-[#a59b96]">
-                              {ord.order_number}
-                            </div>
-                            <div className="font-bold text-sm">{ord.salon_name}</div>
-                            <div className="text-[#6b625e] dark:text-[#a59b96]">
-                              {ord.items.map((i) => `${i.qty}x ${i.sku_name}`).join(", ")}
-                            </div>
-                            {ord.delivered_at && (
-                              <div className="text-[11px] text-emerald-700 dark:text-emerald-400 mt-0.5">
-                                Delivered {when(ord.delivered_at)}
-                                {ord.signature_data
-                                  ? " · Digital signature attached"
-                                  : " · Confirmed by Owner / Manager"}
+                      {filteredDeliveries.map((ord) => {
+                        const isPending = ord.status === "pending_delivery";
+                        const isSelected = isPending && activeSelectedSet.has(ord.id);
+                        return (
+                          <div
+                            key={ord.id}
+                            className="py-3 first:pt-0 last:pb-0 flex items-start justify-between gap-2"
+                          >
+                            <div className="flex items-start gap-2 min-w-0">
+                              {isManager && isPending && (
+                                <label
+                                  aria-label={`Select ledger order ${ord.order_number}`}
+                                  className="min-h-[36px] min-w-[26px] -ml-1 flex items-center justify-center cursor-pointer shrink-0"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={isSelected}
+                                    onChange={() => toggleSelectOrder(ord.id)}
+                                    className="w-4 h-4 rounded accent-[#7a2e4a] cursor-pointer"
+                                  />
+                                </label>
+                              )}
+                              <div className="min-w-0">
+                                <div className="font-mono text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                                  {ord.order_number}
+                                </div>
+                                <div className="font-bold text-sm">{ord.salon_name}</div>
+                                <div className="text-[#6b625e] dark:text-[#a59b96]">
+                                  {ord.items.map((i) => `${i.qty}x ${i.sku_name}`).join(", ")}
+                                </div>
+                                {ord.delivered_at && (
+                                  <div className="text-[11px] text-emerald-700 dark:text-emerald-400 mt-0.5">
+                                    Delivered {when(ord.delivered_at)}
+                                    {ord.signature_data
+                                      ? " · Digital signature attached"
+                                      : " · Confirmed by Owner / Manager"}
+                                  </div>
+                                )}
                               </div>
-                            )}
-                          </div>
-                          <div className="flex flex-col items-end gap-1.5 shrink-0">
-                            <div className="text-right">
-                              <div className="font-bold tabular-nums">
-                                PKR {ord.total_amount.toLocaleString()}
-                              </div>
-                              <div
-                                className={`text-[11px] font-semibold mt-0.5 ${
-                                  ord.status === "delivered"
-                                    ? "text-emerald-700 dark:text-emerald-400"
-                                    : "text-amber-700 dark:text-amber-300"
-                                }`}
-                              >
-                                {ord.status === "delivered" ? "Delivered" : "Pending Delivery"}
-                              </div>
                             </div>
+                            <div className="flex flex-col items-end gap-1.5 shrink-0">
+                              <div className="text-right">
+                                <div className="font-bold tabular-nums">
+                                  PKR {ord.total_amount.toLocaleString()}
+                                </div>
+                                <div
+                                  className={`text-[11px] font-semibold mt-0.5 ${
+                                    ord.status === "delivered"
+                                      ? "text-emerald-700 dark:text-emerald-400"
+                                      : "text-amber-700 dark:text-amber-300"
+                                  }`}
+                                >
+                                  {ord.status === "delivered" ? "Delivered" : "Pending Delivery"}
+                                </div>
+                              </div>
 
-                            <DeliveryQuickActionsMenu
-                              order={ord}
-                              isOpen={openActionMenuOrderId === ord.id}
-                              onToggle={() =>
-                                setOpenActionMenuOrderId((prev) => (prev === ord.id ? null : ord.id))
-                              }
-                              onClose={() => setOpenActionMenuOrderId(null)}
-                              onViewReceipt={(o) => setReceiptOrder(o)}
-                              onResendNotification={handleResendDeliveryNotification}
-                              onRequestMarkDelivered={(o) => setConfirmDeliverOrder(o)}
-                              canMarkDelivered={userRole === "manager"}
-                              isNotifying={notifyingOrderId === ord.id}
-                            />
+                              <DeliveryQuickActionsMenu
+                                order={ord}
+                                isOpen={openActionMenuOrderId === ord.id}
+                                onToggle={() =>
+                                  setOpenActionMenuOrderId((prev) =>
+                                    prev === ord.id ? null : ord.id,
+                                  )
+                                }
+                                onClose={() => setOpenActionMenuOrderId(null)}
+                                onViewReceipt={(o) => setReceiptOrder(o)}
+                                onResendNotification={handleResendDeliveryNotification}
+                                onRequestMarkDelivered={(o) => setConfirmDeliverOrder(o)}
+                                canMarkDelivered={isManager}
+                                isNotifying={notifyingOrderId === ord.id}
+                              />
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </>
@@ -876,6 +1036,13 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
         isSubmitting={markingDelivered}
         onCancel={() => setConfirmDeliverOrder(null)}
         onConfirm={handleConfirmMarkDelivered}
+      />
+
+      <ConfirmBulkDeliveredModal
+        orders={bulkConfirmOrders}
+        isSubmitting={markingBulkDelivered}
+        onCancel={() => setBulkConfirmOrders([])}
+        onConfirm={handleConfirmBulkMarkDelivered}
       />
     </div>
   );

@@ -635,6 +635,39 @@ export class MemoryKiranRepository implements KiranRepository {
         order.delivered_at = new Date().toISOString();
         return { ok: true, message: `Order ${order.order_number} marked as delivered.` };
       }
+
+      case "mark_deliveries_delivered": {
+        const uniqueIds = Array.from(new Set(input.ids.filter((id) => typeof id === "string" && id.trim())));
+        if (uniqueIds.length === 0) {
+          throw new RpcError("No delivery order IDs provided.", 400, "22023");
+        }
+        const now = new Date().toISOString();
+        let updatedCount = 0;
+        let matchedCount = 0;
+        for (const orderId of uniqueIds) {
+          const order = this.orders.find((o) => o.id === orderId);
+          if (!order) continue;
+          matchedCount++;
+          if (order.status !== "delivered") {
+            order.status = "delivered";
+            order.delivered_at = now;
+            updatedCount++;
+          }
+        }
+        if (matchedCount === 0) {
+          throw new RpcError("No matching delivery orders found.", 404, "P0002");
+        }
+        if (updatedCount === 0) {
+          return { ok: true, message: "Selected orders are already marked as delivered." };
+        }
+        return {
+          ok: true,
+          message:
+            updatedCount === 1
+              ? "1 order marked as delivered."
+              : `${updatedCount} orders marked as delivered.`,
+        };
+      }
     }
   }
 

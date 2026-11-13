@@ -253,13 +253,25 @@ async function startServer() {
   app.post("/api/manager/approvals", requireAuth, async (req: AuthenticatedRequest, res) => {
     try {
       const action = req.body as ManagerApprovalAction;
-      if (!action || typeof action.action !== "string" || typeof action.id !== "string") {
+      if (!action || typeof action.action !== "string") {
         res.status(400).json({ error: "Invalid approval payload." });
         return;
       }
-      if (action.action === "mark_delivery_delivered" && req.user?.role !== "manager") {
+      if (action.action === "mark_deliveries_delivered") {
+        if (!Array.isArray(action.ids) || action.ids.length === 0) {
+          res.status(400).json({ error: "Please select at least one pending delivery order." });
+          return;
+        }
+      } else if (typeof action.id !== "string") {
+        res.status(400).json({ error: "Invalid approval payload." });
+        return;
+      }
+      if (
+        (action.action === "mark_delivery_delivered" || action.action === "mark_deliveries_delivered") &&
+        req.user?.role !== "manager"
+      ) {
         res.status(403).json({
-          error: "Only an Owner or Office Manager can mark a delivery order as delivered directly.",
+          error: "Only an Owner or Office Manager can mark delivery orders as delivered directly.",
         });
         return;
       }

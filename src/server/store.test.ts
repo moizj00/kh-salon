@@ -225,3 +225,25 @@ test("notifyDelivery returns formatted notification payload with salon recipient
   assert.ok(res.message.includes("ORD-KRN-2026-8801"));
   assert.ok(res.message.includes("0300-8234190"));
 });
+
+test("handleManagerApproval marks multiple pending deliveries as delivered in one batch", async () => {
+  const repo = new MemoryKiranRepository();
+
+  const res = await repo.handleManagerApproval({
+    action: "mark_deliveries_delivered",
+    ids: ["ord-8801", "ord-8802"],
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.message, "2 orders marked as delivered.");
+
+  const boot = await repo.getBootstrap(repUser);
+  assert.equal(boot.orders.find((o) => o.id === "ord-8801")?.status, "delivered");
+  assert.equal(boot.orders.find((o) => o.id === "ord-8802")?.status, "delivered");
+
+  const replay = await repo.handleManagerApproval({
+    action: "mark_deliveries_delivered",
+    ids: ["ord-8801", "ord-8802"],
+  });
+  assert.equal(replay.ok, true);
+  assert.equal(replay.message, "Selected orders are already marked as delivered.");
+});

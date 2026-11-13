@@ -399,3 +399,195 @@ export const ConfirmDeliveredModal: React.FC<ConfirmDeliveredModalProps> = ({
     </div>
   );
 };
+
+interface ConfirmBulkDeliveredModalProps {
+  orders: DeliveryOrderFull[];
+  isSubmitting: boolean;
+  onCancel: () => void;
+  onConfirm: (orders: DeliveryOrderFull[]) => void;
+}
+
+export const ConfirmBulkDeliveredModal: React.FC<ConfirmBulkDeliveredModalProps> = ({
+  orders,
+  isSubmitting,
+  onCancel,
+  onConfirm,
+}) => {
+  if (orders.length === 0) return null;
+
+  const combinedTotal = orders.reduce((acc, o) => acc + o.total_amount, 0);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="confirm-bulk-delivered-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+    >
+      <div className="w-full max-w-md rounded-3xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-2xl p-5 space-y-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <div className="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 flex items-center justify-center shrink-0">
+              <ShieldCheck className="w-5 h-5" />
+            </div>
+            <div>
+              <h3
+                id="confirm-bulk-delivered-title"
+                className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]"
+              >
+                Confirm Bulk Delivery Completion
+              </h3>
+              <p className="text-xs text-[#6b625e] dark:text-[#a59b96] tabular-nums">
+                {orders.length} {orders.length === 1 ? "pending order" : "pending orders"} selected
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            aria-label="Close bulk confirmation dialog"
+            onClick={onCancel}
+            className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-[#6b625e]"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="rounded-2xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] divide-y divide-[#e6dfdb]/60 dark:divide-[#3a3330] max-h-48 overflow-y-auto text-xs">
+          {orders.map((ord) => (
+            <div key={ord.id} className="p-3 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-mono text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                  {ord.order_number}
+                </div>
+                <div className="font-semibold text-[#1d1a19] dark:text-[#f2eeec] truncate">
+                  {ord.salon_name}
+                </div>
+              </div>
+              <span className="font-bold text-[#7a2e4a] dark:text-[#d77a9c] tabular-nums shrink-0">
+                PKR {ord.total_amount.toLocaleString()}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div className="flex items-center justify-between px-1 text-xs">
+          <span className="text-[#6b625e] dark:text-[#a59b96]">
+            Combined Value ({orders.length} {orders.length === 1 ? "order" : "orders"})
+          </span>
+          <span className="font-bold text-sm text-[#7a2e4a] dark:text-[#d77a9c] tabular-nums">
+            PKR {combinedTotal.toLocaleString()}
+          </span>
+        </div>
+
+        <p className="text-xs text-[#6b625e] dark:text-[#a59b96] leading-relaxed">
+          Confirm below to update all {orders.length} selected{" "}
+          {orders.length === 1 ? "order" : "orders"} from Pending Delivery to Delivered.
+        </p>
+
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2 pt-1">
+          <button
+            type="button"
+            disabled={isSubmitting}
+            onClick={onCancel}
+            className="min-h-[42px] px-4 py-2 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold hover:bg-black/5 dark:hover:bg-white/5"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={isSubmitting}
+            onClick={() => onConfirm(orders)}
+            className="min-h-[42px] px-4 py-2 rounded-xl bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 hover:bg-emerald-800 disabled:opacity-50"
+          >
+            {isSubmitting ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                <span>Updating {orders.length} Orders...</span>
+              </>
+            ) : (
+              <>
+                <CheckCircle2 className="w-4 h-4" />
+                <span>YES IT&apos;S DELIVERED</span>
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+interface DeliveryBulkBarProps {
+  visiblePendingCount: number;
+  selectedCount: number;
+  allVisiblePendingSelected: boolean;
+  someVisiblePendingSelected: boolean;
+  onToggleSelectAll: () => void;
+  onMarkSelectedDelivered: () => void;
+  checkboxId: string;
+}
+
+export const DeliveryBulkBar: React.FC<DeliveryBulkBarProps> = ({
+  visiblePendingCount,
+  selectedCount,
+  allVisiblePendingSelected,
+  someVisiblePendingSelected,
+  onToggleSelectAll,
+  onMarkSelectedDelivered,
+  checkboxId,
+}) => {
+  const selectAllRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = someVisiblePendingSelected && !allVisiblePendingSelected;
+    }
+  }, [someVisiblePendingSelected, allVisiblePendingSelected]);
+
+  if (visiblePendingCount === 0 && selectedCount === 0) {
+    return null;
+  }
+
+  return (
+    <div className="p-2.5 sm:px-3.5 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] flex flex-wrap items-center justify-between gap-2.5">
+      <label
+        htmlFor={checkboxId}
+        className={`inline-flex items-center gap-2.5 min-h-[40px] px-1.5 rounded-xl text-xs font-semibold select-none ${
+          visiblePendingCount === 0
+            ? "opacity-50 cursor-not-allowed text-[#6b625e] dark:text-[#a59b96]"
+            : "cursor-pointer text-[#1d1a19] dark:text-[#f2eeec]"
+        }`}
+      >
+        <input
+          ref={selectAllRef}
+          id={checkboxId}
+          type="checkbox"
+          disabled={visiblePendingCount === 0}
+          checked={visiblePendingCount > 0 && allVisiblePendingSelected}
+          onChange={onToggleSelectAll}
+          className="w-4 h-4 rounded accent-[#7a2e4a] cursor-pointer disabled:cursor-not-allowed"
+        />
+        <span className="whitespace-nowrap">Select All</span>
+        <span className="text-[11px] font-normal text-[#6b625e] dark:text-[#a59b96] tabular-nums whitespace-nowrap">
+          {selectedCount > 0
+            ? `${selectedCount} selected`
+            : `${visiblePendingCount} pending`}
+        </span>
+      </label>
+
+      <button
+        type="button"
+        disabled={selectedCount === 0}
+        onClick={onMarkSelectedDelivered}
+        className="min-h-[40px] px-3.5 py-2 rounded-xl bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5 hover:bg-emerald-800 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap shrink-0 transition-colors tabular-nums"
+      >
+        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+        <span>
+          {selectedCount > 0
+            ? `Mark Selected as Delivered (${selectedCount})`
+            : "Mark Selected as Delivered"}
+        </span>
+      </button>
+    </div>
+  );
+};
