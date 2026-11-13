@@ -154,7 +154,18 @@ export type ManagerApprovalAction =
   | { action: "reject_order_card"; id: string }
   | { action: "approve_shift"; id: string }
   | { action: "flag_shift"; id: string }
-  | { action: "update_shop_order_status"; id: string; status: "pending" | "confirmed" | "dispatched" };
+  | { action: "update_shop_order_status"; id: string; status: "pending" | "confirmed" | "dispatched" }
+  | { action: "mark_delivery_delivered"; id: string };
+
+export interface DeliveryNotificationResult {
+  ok: true;
+  orderId: string;
+  orderNumber: string;
+  salonName: string;
+  recipientPhone: string;
+  notifiedAt: string;
+  message: string;
+}
 
 export class RpcError extends Error {
   status: number;
@@ -183,5 +194,6 @@ export interface KiranRepository {
   listShopOrders(): Promise<PublicShopOrder[]>;
   getManagerOverview(user: UserProfile): Promise<ManagerOverviewPayload>;
   handleManagerApproval(input: ManagerApprovalAction): Promise<{ ok: true; message: string }>;
+  notifyDelivery(orderId: string): Promise<DeliveryNotificationResult>;
   bulkImportSalons(salons: BulkSalonInput[], createdBy: string): Promise<number>;
 }

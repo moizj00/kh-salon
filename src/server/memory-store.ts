@@ -12,6 +12,7 @@ import {
   type BootstrapPayload,
   type BulkSalonInput,
   type CreateShopOrderInput,
+  type DeliveryNotificationResult,
   type DeliveryOrderFull,
   type KiranRepository,
   type LostDemandRecord,
@@ -623,7 +624,37 @@ export class MemoryKiranRepository implements KiranRepository {
         order.status = input.status;
         return { ok: true, message: `Order ${order.orderNumber} updated to ${input.status}.` };
       }
+
+      case "mark_delivery_delivered": {
+        const order = this.orders.find((o) => o.id === input.id);
+        if (!order) throw new RpcError("Delivery order not found.", 404, "P0002");
+        if (order.status === "delivered") {
+          return { ok: true, message: `Order ${order.order_number} is already marked as delivered.` };
+        }
+        order.status = "delivered";
+        order.delivered_at = new Date().toISOString();
+        return { ok: true, message: `Order ${order.order_number} marked as delivered.` };
+      }
     }
+  }
+
+  async notifyDelivery(orderId: string): Promise<DeliveryNotificationResult> {
+    const order = this.orders.find((o) => o.id === orderId);
+    if (!order) {
+      throw new RpcError("Delivery order not found.", 404, "P0002");
+    }
+    const salon = this.salons.find((s) => s.id === order.salon_id);
+    const recipientPhone = salon?.phone ?? "On-file contact";
+    const notifiedAt = new Date().toISOString();
+    return {
+      ok: true,
+      orderId: order.id,
+      orderNumber: order.order_number,
+      salonName: order.salon_name,
+      recipientPhone,
+      notifiedAt,
+      message: `Notification resent for ${order.order_number} to ${order.salon_name} (${recipientPhone}).`,
+    };
   }
 
   async bulkImportSalons(salons: BulkSalonInput[], _createdBy: string): Promise<number> {

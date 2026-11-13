@@ -57,3 +57,23 @@ button, a, input, select, textarea {
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print-receipt-root,
+  .print-receipt-root * {
+    visibility: visible;
+  }
+  .print-receipt-root {
+    position: fixed;
+    inset: 0;
+    background: #ffffff !important;
+    color: #111111 !important;
+    padding: 24px !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+}

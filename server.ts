@@ -228,6 +228,17 @@ async function startServer() {
     }
   });
 
+  // Delivery Notification Dispatch
+  app.post("/api/deliveries/:id/notify", requireAuth, async (req: AuthenticatedRequest, res) => {
+    try {
+      const outcome = await repo.notifyDelivery(req.params.id);
+      res.json(outcome);
+    } catch (err) {
+      const status = err instanceof RpcError ? err.status : 500;
+      res.status(status).json({ error: err instanceof Error ? err.message : "Failed to resend notification." });
+    }
+  });
+
   // Office Manager Overview & Approvals
   app.get("/api/manager/overview", requireAuth, async (req: AuthenticatedRequest, res) => {
     try {
@@ -244,6 +255,12 @@ async function startServer() {
       const action = req.body as ManagerApprovalAction;
       if (!action || typeof action.action !== "string" || typeof action.id !== "string") {
         res.status(400).json({ error: "Invalid approval payload." });
+        return;
+      }
+      if (action.action === "mark_delivery_delivered" && req.user?.role !== "manager") {
+        res.status(403).json({
+          error: "Only an Owner or Office Manager can mark a delivery order as delivered directly.",
+        });
         return;
       }
       const outcome = await repo.handleManagerApproval(action);

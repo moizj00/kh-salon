@@ -14,7 +14,9 @@ import {
   getAuthConfig,
   getAuthToken,
   getCurrentUser,
+  resendDeliveryNotification,
   setAuthToken,
+  submitManagerApproval,
 } from "./lib/api";
 import {
   discardItem,
@@ -35,6 +37,11 @@ import { cachedRows } from "./lib/cache";
 import { registerServiceWorker } from "./lib/register-sw";
 import { when } from "./lib/time";
 import { AuthGate } from "./components/auth-gate";
+import {
+  ConfirmDeliveredModal,
+  DeliveryQuickActionsMenu,
+  DeliveryReceiptModal,
+} from "./components/delivery-actions";
 import { ManagerDashboard } from "./components/manager-dashboard";
 import { BottomNavigation, type TabKey } from "./components/navigation";
 import { OutboxStatus } from "./components/outbox-status";
@@ -125,8 +132,14 @@ export default function App() {
   const [newSalonContact, setNewSalonContact] = useState("");
   const [confirmWipe, setConfirmWipe] = useState(false);
 
-  // Delivery order signing
+  // Delivery order signing, filtering & Quick Actions
   const [signingOrderId, setSigningOrderId] = useState<string | null>(null);
+  const [deliveryFilter, setDeliveryFilter] = useState<"all" | "pending_delivery" | "delivered">("all");
+  const [openActionMenuOrderId, setOpenActionMenuOrderId] = useState<string | null>(null);
+  const [receiptOrder, setReceiptOrder] = useState<DeliveryOrderFull | null>(null);
+  const [confirmDeliverOrder, setConfirmDeliverOrder] = useState<DeliveryOrderFull | null>(null);
+  const [markingDelivered, setMarkingDelivered] = useState(false);
+  const [notifyingOrderId, setNotifyingOrderId] = useState<string | null>(null);
 
   // Feedback notifications / toasts
   const [toast, setToast] = useState<{ message: string; type: "ok" | "info" | "warn" } | null>(null);
@@ -594,6 +607,46 @@ export default function App() {
     }
   };
 
+  const handleResendDeliveryNotification = async (order: DeliveryOrderFull) => {
+    setNotifyingOrderId(order.id);
+    try {
+      const res = await resendDeliveryNotification(order.id);
+      showToast(res.message, "ok");
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : "Could not resend order notification.",
+        "warn",
+      );
+    } finally {
+      setNotifyingOrderId(null);
+    }
+  };
+
+  const handleConfirmMarkDelivered = async (order: DeliveryOrderFull) => {
+    setMarkingDelivered(true);
+    try {
+      const res = await submitManagerApproval({
+        action: "mark_delivery_delivered",
+        id: order.id,
+      });
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === order.id ? { ...o, status: "delivered", delivered_at: new Date().toISOString() } : o,
+        ),
+      );
+      setConfirmDeliverOrder(null);
+      showToast(res.message, "ok");
+      void refreshBootstrap();
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : "Failed to update delivery status.",
+        "warn",
+      );
+    } finally {
+      setMarkingDelivered(false);
+    }
+  };
+
   const filteredSalons = salons.filter((s) => {
     const matchesSearch =
       s.name.toLowerCase().includes(salonSearch.toLowerCase()) ||
@@ -677,6 +730,7 @@ export default function App() {
         {workspaceMode === "manager" ? (
           <ManagerDashboard
             showToast={showToast}
+            userRole={user.role}
             onApprovedChange={() => {
               void refreshBootstrap();
             }}
@@ -1278,112 +1332,198 @@ export default function App() {
             {/* ================= TAB 4: ORDERS & DELIVERIES ================= */}
             {activeTab === "orders" && (
               <div className="space-y-4">
-                <div>
-                  <h2 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
-                    Deliveries & Customer Signatures
-                  </h2>
-                  <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                    Deliver goods with customer-signed digital acknowledgement
-                  </p>
-                </div>
+                {(() => {
+                  const allCount = orders.length;
+                  const pendingCount = orders.filter((o) => o.status === "pending_delivery").length;
+                  const deliveredCount = orders.filter((o) => o.status === "delivered").length;
+                  const filteredOrders =
+                    deliveryFilter === "all"
+                      ? orders
+                      : orders.filter((o) => o.status === deliveryFilter);
 
-                {signingOrderId ? (
-                  <div className="max-w-lg p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h3 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
-                        Customer Signature
-                      </h3>
-                      <button
-                        type="button"
-                        aria-label="Cancel signature"
-                        onClick={() => setSigningOrderId(null)}
-                        className="p-1 text-[#6b625e]"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    </div>
-
-                    {(() => {
-                      const ord = orders.find((o) => o.id === signingOrderId);
-                      return ord ? (
-                        <SignaturePad
-                          salonName={ord.salon_name}
-                          onCapture={handleConfirmDeliverySignature}
-                        />
-                      ) : null;
-                    })()}
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {orders.map((order) => (
-                      <div
-                        key={order.id}
-                        className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-2.5 flex flex-col justify-between"
-                      >
-                        <div className="space-y-2.5">
-                          <div className="flex items-start justify-between gap-2">
-                            <div>
-                              <span className="text-[11px] font-mono text-[#6b625e] dark:text-[#a59b96]">
-                                {order.order_number}
-                              </span>
-                              <h4 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
-                                {order.salon_name}
-                              </h4>
-                            </div>
-                            <span
-                              className={`text-xs font-semibold shrink-0 ${
-                                order.status === "delivered"
-                                  ? "text-emerald-700 dark:text-emerald-400"
-                                  : "text-amber-700 dark:text-amber-300"
-                              }`}
-                            >
-                              {order.status === "delivered" ? "Delivered" : "Pending Delivery"}
-                            </span>
-                          </div>
-
-                          <div className="text-xs space-y-1 bg-[#faf7f5] dark:bg-[#171413] p-3 rounded-xl border border-[#e6dfdb]/60 dark:border-[#3a3330]">
-                            {order.items.map((it, idx) => (
-                              <div key={idx} className="flex justify-between gap-2">
-                                <span>
-                                  {it.qty}x {it.sku_name}
-                                </span>
-                                <span className="tabular-nums font-medium shrink-0">
-                                  PKR {(it.qty * it.price).toLocaleString()}
-                                </span>
-                              </div>
-                            ))}
-                            <div className="pt-1.5 border-t border-[#e6dfdb] dark:border-[#3a3330] flex justify-between font-bold">
-                              <span>Invoice Total</span>
-                              <span className="text-[#7a2e4a] dark:text-[#d77a9c] tabular-nums">
-                                PKR {order.total_amount.toLocaleString()}
-                              </span>
-                            </div>
-                          </div>
+                  return (
+                    <>
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <h2 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
+                            Deliveries & Customer Signatures
+                          </h2>
+                          <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                            Deliver goods with customer-signed digital acknowledgement
+                          </p>
                         </div>
 
-                        <div className="pt-1">
-                          {order.status === "pending_delivery" ? (
+                        {!signingOrderId && (
+                          <div
+                            role="group"
+                            aria-label="Filter delivery orders by status"
+                            className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#f1eae6] dark:bg-[#2a2523] border border-[#e6dfdb] dark:border-[#3a3330]"
+                          >
+                            {(
+                              [
+                                { id: "all", label: `All (${allCount})` },
+                                { id: "pending_delivery", label: `Pending (${pendingCount})` },
+                                { id: "delivered", label: `Delivered (${deliveredCount})` },
+                              ] as const
+                            ).map((opt) => (
+                              <button
+                                key={opt.id}
+                                type="button"
+                                aria-pressed={deliveryFilter === opt.id}
+                                onClick={() => setDeliveryFilter(opt.id)}
+                                className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition-colors tabular-nums ${
+                                  deliveryFilter === opt.id
+                                    ? "bg-white dark:bg-[#171413] text-[#7a2e4a] dark:text-[#d77a9c] shadow-xs"
+                                    : "text-[#6b625e] dark:text-[#a59b96] hover:text-[#1d1a19] dark:hover:text-[#f2eeec]"
+                                }`}
+                              >
+                                {opt.label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {signingOrderId ? (
+                        <div className="max-w-lg p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-3">
+                          <div className="flex items-center justify-between">
+                            <h3 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
+                              Customer Signature
+                            </h3>
                             <button
                               type="button"
-                              onClick={() => setSigningOrderId(order.id)}
-                              className="w-full py-2.5 rounded-xl bg-[#7a2e4a] text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-xs hover:opacity-95"
+                              aria-label="Cancel signature"
+                              onClick={() => setSigningOrderId(null)}
+                              className="p-1 text-[#6b625e]"
                             >
-                              <ShieldCheck className="w-4 h-4" />
-                              <span>Deliver & Capture Salon Signature</span>
+                              <X className="w-4 h-4" />
                             </button>
-                          ) : (
-                            <div className="text-xs text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5">
-                              <Check className="w-4 h-4 shrink-0" />
-                              <span>
-                                Delivered {when(order.delivered_at || "")} with signed acknowledgement.
-                              </span>
-                            </div>
+                          </div>
+
+                          {(() => {
+                            const ord = orders.find((o) => o.id === signingOrderId);
+                            return ord ? (
+                              <SignaturePad
+                                salonName={ord.salon_name}
+                                onCapture={handleConfirmDeliverySignature}
+                              />
+                            ) : null;
+                          })()}
+                        </div>
+                      ) : filteredOrders.length === 0 ? (
+                        <div className="p-8 rounded-2xl bg-white dark:bg-[#211d1b] border border-dashed border-[#e6dfdb] dark:border-[#3a3330] text-center space-y-2.5">
+                          <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                            {deliveryFilter === "delivered"
+                              ? "No delivered orders yet."
+                              : deliveryFilter === "pending_delivery"
+                                ? "No pending delivery orders."
+                                : "No delivery orders available."}
+                          </p>
+                          {deliveryFilter !== "all" && (
+                            <button
+                              type="button"
+                              onClick={() => setDeliveryFilter("all")}
+                              className="px-3.5 py-2 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold hover:border-[#7a2e4a]"
+                            >
+                              Show All Orders
+                            </button>
                           )}
                         </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {filteredOrders.map((order) => (
+                            <div
+                              key={order.id}
+                              className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-2.5 flex flex-col justify-between"
+                            >
+                              <div className="space-y-2.5">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className="text-[11px] font-mono text-[#6b625e] dark:text-[#a59b96]">
+                                        {order.order_number}
+                                      </span>
+                                      <span
+                                        className={`text-xs font-semibold shrink-0 ${
+                                          order.status === "delivered"
+                                            ? "text-emerald-700 dark:text-emerald-400"
+                                            : "text-amber-700 dark:text-amber-300"
+                                        }`}
+                                      >
+                                        {order.status === "delivered" ? "Delivered" : "Pending Delivery"}
+                                      </span>
+                                    </div>
+                                    <h4 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec] mt-0.5 truncate">
+                                      {order.salon_name}
+                                    </h4>
+                                  </div>
+
+                                  <DeliveryQuickActionsMenu
+                                    order={order}
+                                    isOpen={openActionMenuOrderId === order.id}
+                                    onToggle={() =>
+                                      setOpenActionMenuOrderId((prev) =>
+                                        prev === order.id ? null : order.id,
+                                      )
+                                    }
+                                    onClose={() => setOpenActionMenuOrderId(null)}
+                                    onViewReceipt={(o) => setReceiptOrder(o)}
+                                    onResendNotification={handleResendDeliveryNotification}
+                                    onRequestMarkDelivered={(o) => setConfirmDeliverOrder(o)}
+                                    canMarkDelivered={user.role === "manager"}
+                                    isNotifying={notifyingOrderId === order.id}
+                                  />
+                                </div>
+
+                                <div className="text-xs space-y-1 bg-[#faf7f5] dark:bg-[#171413] p-3 rounded-xl border border-[#e6dfdb]/60 dark:border-[#3a3330]">
+                                  {order.items.map((it, idx) => (
+                                    <div key={idx} className="flex justify-between gap-2">
+                                      <span>
+                                        {it.qty}x {it.sku_name}
+                                      </span>
+                                      <span className="tabular-nums font-medium shrink-0">
+                                        PKR {(it.qty * it.price).toLocaleString()}
+                                      </span>
+                                    </div>
+                                  ))}
+                                  <div className="pt-1.5 border-t border-[#e6dfdb] dark:border-[#3a3330] flex justify-between font-bold">
+                                    <span>Invoice Total</span>
+                                    <span className="text-[#7a2e4a] dark:text-[#d77a9c] tabular-nums">
+                                      PKR {order.total_amount.toLocaleString()}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="pt-1">
+                                {order.status === "pending_delivery" ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => setSigningOrderId(order.id)}
+                                    className="w-full py-2.5 rounded-xl bg-[#7a2e4a] text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-xs hover:opacity-95"
+                                  >
+                                    <ShieldCheck className="w-4 h-4" />
+                                    <span>Deliver & Capture Salon Signature</span>
+                                  </button>
+                                ) : (
+                                  <div className="text-xs text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5">
+                                    <Check className="w-4 h-4 shrink-0" />
+                                    <span>
+                                      Delivered {when(order.delivered_at || "")}{" "}
+                                      {order.signature_data
+                                        ? "with signed acknowledgement."
+                                        : "confirmed by Owner / Manager."}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             )}
 
@@ -1970,6 +2110,20 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Delivery Receipt Modal & Owner/Manager Delivered Confirmation Modal */}
+      <DeliveryReceiptModal
+        order={receiptOrder}
+        salon={receiptOrder ? salons.find((s) => s.id === receiptOrder.salon_id) ?? null : null}
+        onClose={() => setReceiptOrder(null)}
+      />
+
+      <ConfirmDeliveredModal
+        order={confirmDeliverOrder}
+        isSubmitting={markingDelivered}
+        onCancel={() => setConfirmDeliverOrder(null)}
+        onConfirm={handleConfirmMarkDelivered}
+      />
 
       {/* Fixed Bottom Navigation Anchor (Field Rep mode) */}
       {workspaceMode === "rep" && (

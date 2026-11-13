@@ -12,14 +12,25 @@ import {
   Store,
   X,
 } from "lucide-react";
-import { fetchManagerOverview, submitManagerApproval } from "../lib/api";
+import { fetchManagerOverview, resendDeliveryNotification, submitManagerApproval } from "../lib/api";
 import { when } from "../lib/time";
-import type { ManagerApprovalAction, ManagerOverviewPayload } from "../server/types";
+import type {
+  DeliveryOrderFull,
+  ManagerApprovalAction,
+  ManagerOverviewPayload,
+  UserRole,
+} from "../server/types";
+import {
+  ConfirmDeliveredModal,
+  DeliveryQuickActionsMenu,
+  DeliveryReceiptModal,
+} from "./delivery-actions";
 import { SalonBulkImportModal } from "./salon-bulk-import-modal";
 
 interface ManagerDashboardProps {
   showToast: (msg: string, type?: "ok" | "info" | "warn") => void;
   onApprovedChange?: () => void;
+  userRole?: UserRole;
 }
 
 type ManagerSection = "approvals" | "collections" | "orders" | "inventory";
@@ -27,6 +38,7 @@ type ManagerSection = "approvals" | "collections" | "orders" | "inventory";
 export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   showToast,
   onApprovedChange,
+  userRole = "manager",
 }) => {
   const [section, setSection] = useState<ManagerSection>("approvals");
   const [data, setData] = useState<ManagerOverviewPayload | null>(null);
@@ -35,6 +47,12 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [salonQuery, setSalonQuery] = useState("");
   const [showBulkImport, setShowBulkImport] = useState(false);
+  const [deliveryFilter, setDeliveryFilter] = useState<"all" | "pending_delivery" | "delivered">("all");
+  const [openActionMenuOrderId, setOpenActionMenuOrderId] = useState<string | null>(null);
+  const [receiptOrder, setReceiptOrder] = useState<DeliveryOrderFull | null>(null);
+  const [confirmDeliverOrder, setConfirmDeliverOrder] = useState<DeliveryOrderFull | null>(null);
+  const [markingDelivered, setMarkingDelivered] = useState(false);
+  const [notifyingOrderId, setNotifyingOrderId] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -64,6 +82,36 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
       showToast(err instanceof Error ? err.message : "Action failed.", "warn");
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const handleResendDeliveryNotification = async (order: DeliveryOrderFull) => {
+    setNotifyingOrderId(order.id);
+    try {
+      const res = await resendDeliveryNotification(order.id);
+      showToast(res.message, "ok");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not resend order notification.", "warn");
+    } finally {
+      setNotifyingOrderId(null);
+    }
+  };
+
+  const handleConfirmMarkDelivered = async (order: DeliveryOrderFull) => {
+    setMarkingDelivered(true);
+    try {
+      const res = await submitManagerApproval({
+        action: "mark_delivery_delivered",
+        id: order.id,
+      });
+      setConfirmDeliverOrder(null);
+      showToast(res.message, "ok");
+      await load();
+      onApprovedChange?.();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Failed to update delivery status.", "warn");
+    } finally {
+      setMarkingDelivered(false);
     }
   };
 
@@ -614,46 +662,135 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
 
           {/* Rep Delivery Orders */}
           <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-sm">Salon Delivery Ledger</h3>
-              <span className="text-xs text-[#6b625e] dark:text-[#a59b96] tabular-nums">
-                {data.deliveryOrders.length} deliveries
-              </span>
-            </div>
+            {(() => {
+              const allCount = data.deliveryOrders.length;
+              const pendingCount = data.deliveryOrders.filter(
+                (o) => o.status === "pending_delivery",
+              ).length;
+              const deliveredCount = data.deliveryOrders.filter(
+                (o) => o.status === "delivered",
+              ).length;
+              const filteredDeliveries =
+                deliveryFilter === "all"
+                  ? data.deliveryOrders
+                  : data.deliveryOrders.filter((o) => o.status === deliveryFilter);
 
-            <div className="divide-y divide-[#e6dfdb]/60 dark:divide-[#3a3330] text-xs">
-              {data.deliveryOrders.map((ord) => (
-                <div key={ord.id} className="py-3 first:pt-0 last:pb-0 flex items-start justify-between gap-2">
-                  <div>
-                    <div className="font-mono text-[11px] text-[#6b625e] dark:text-[#a59b96]">
-                      {ord.order_number}
+              return (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h3 className="font-bold text-sm">Salon Delivery Ledger</h3>
+                      <span className="text-xs text-[#6b625e] dark:text-[#a59b96] tabular-nums">
+                        {filteredDeliveries.length} of {allCount} deliveries
+                      </span>
                     </div>
-                    <div className="font-bold text-sm">{ord.salon_name}</div>
-                    <div className="text-[#6b625e] dark:text-[#a59b96]">
-                      {ord.items.map((i) => `${i.qty}x ${i.sku_name}`).join(", ")}
-                    </div>
-                    {ord.delivered_at && (
-                      <div className="text-[11px] text-emerald-700 dark:text-emerald-400 mt-0.5">
-                        Delivered {when(ord.delivered_at)}
-                        {ord.signature_data ? " · Digital signature attached" : ""}
-                      </div>
-                    )}
-                  </div>
-                  <div className="text-right shrink-0">
-                    <div className="font-bold tabular-nums">PKR {ord.total_amount.toLocaleString()}</div>
+
                     <div
-                      className={`text-[11px] font-semibold mt-0.5 ${
-                        ord.status === "delivered"
-                          ? "text-emerald-700 dark:text-emerald-400"
-                          : "text-amber-700 dark:text-amber-300"
-                      }`}
+                      role="group"
+                      aria-label="Filter salon delivery ledger by status"
+                      className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#f1eae6] dark:bg-[#2a2523] border border-[#e6dfdb] dark:border-[#3a3330]"
                     >
-                      {ord.status === "delivered" ? "Delivered" : "Pending Delivery"}
+                      {(
+                        [
+                          { id: "all", label: `All (${allCount})` },
+                          { id: "pending_delivery", label: `Pending (${pendingCount})` },
+                          { id: "delivered", label: `Delivered (${deliveredCount})` },
+                        ] as const
+                      ).map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          aria-pressed={deliveryFilter === opt.id}
+                          onClick={() => setDeliveryFilter(opt.id)}
+                          className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition-colors tabular-nums ${
+                            deliveryFilter === opt.id
+                              ? "bg-white dark:bg-[#171413] text-[#7a2e4a] dark:text-[#d77a9c] shadow-xs"
+                              : "text-[#6b625e] dark:text-[#a59b96] hover:text-[#1d1a19] dark:hover:text-[#f2eeec]"
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
                     </div>
                   </div>
-                </div>
-              ))}
-            </div>
+
+                  {filteredDeliveries.length === 0 ? (
+                    <div className="py-8 text-center text-xs text-[#6b625e] dark:text-[#a59b96] space-y-2">
+                      <p>
+                        {deliveryFilter === "delivered"
+                          ? "No delivered orders yet."
+                          : deliveryFilter === "pending_delivery"
+                            ? "No pending delivery orders."
+                            : "No delivery orders available."}
+                      </p>
+                      {deliveryFilter !== "all" && (
+                        <button
+                          type="button"
+                          onClick={() => setDeliveryFilter("all")}
+                          className="px-3 py-1.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold hover:border-[#7a2e4a]"
+                        >
+                          Show All Orders
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-[#e6dfdb]/60 dark:divide-[#3a3330] text-xs">
+                      {filteredDeliveries.map((ord) => (
+                        <div key={ord.id} className="py-3 first:pt-0 last:pb-0 flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="font-mono text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                              {ord.order_number}
+                            </div>
+                            <div className="font-bold text-sm">{ord.salon_name}</div>
+                            <div className="text-[#6b625e] dark:text-[#a59b96]">
+                              {ord.items.map((i) => `${i.qty}x ${i.sku_name}`).join(", ")}
+                            </div>
+                            {ord.delivered_at && (
+                              <div className="text-[11px] text-emerald-700 dark:text-emerald-400 mt-0.5">
+                                Delivered {when(ord.delivered_at)}
+                                {ord.signature_data
+                                  ? " · Digital signature attached"
+                                  : " · Confirmed by Owner / Manager"}
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex flex-col items-end gap-1.5 shrink-0">
+                            <div className="text-right">
+                              <div className="font-bold tabular-nums">
+                                PKR {ord.total_amount.toLocaleString()}
+                              </div>
+                              <div
+                                className={`text-[11px] font-semibold mt-0.5 ${
+                                  ord.status === "delivered"
+                                    ? "text-emerald-700 dark:text-emerald-400"
+                                    : "text-amber-700 dark:text-amber-300"
+                                }`}
+                              >
+                                {ord.status === "delivered" ? "Delivered" : "Pending Delivery"}
+                              </div>
+                            </div>
+
+                            <DeliveryQuickActionsMenu
+                              order={ord}
+                              isOpen={openActionMenuOrderId === ord.id}
+                              onToggle={() =>
+                                setOpenActionMenuOrderId((prev) => (prev === ord.id ? null : ord.id))
+                              }
+                              onClose={() => setOpenActionMenuOrderId(null)}
+                              onViewReceipt={(o) => setReceiptOrder(o)}
+                              onResendNotification={handleResendDeliveryNotification}
+                              onRequestMarkDelivered={(o) => setConfirmDeliverOrder(o)}
+                              canMarkDelivered={userRole === "manager"}
+                              isNotifying={notifyingOrderId === ord.id}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -726,6 +863,19 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
           onApprovedChange?.();
         }}
         showToast={showToast}
+      />
+
+      <DeliveryReceiptModal
+        order={receiptOrder}
+        salon={receiptOrder ? data.salons.find((s) => s.id === receiptOrder.salon_id) ?? null : null}
+        onClose={() => setReceiptOrder(null)}
+      />
+
+      <ConfirmDeliveredModal
+        order={confirmDeliverOrder}
+        isSubmitting={markingDelivered}
+        onCancel={() => setConfirmDeliverOrder(null)}
+        onConfirm={handleConfirmMarkDelivered}
       />
     </div>
   );

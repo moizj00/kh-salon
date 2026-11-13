@@ -1,6 +1,7 @@
 import type {
   BootstrapPayload,
   CreateShopOrderInput,
+  DeliveryNotificationResult,
   ManagerApprovalAction,
   ManagerOverviewPayload,
   PublicShopOrder,
@@ -120,5 +121,11 @@ export async function bulkImportSalonsApi(
   return apiFetch("/api/salons/bulk-import", {
     method: "POST",
     body: JSON.stringify({ salons }),
+  });
+}
+
+export async function resendDeliveryNotification(orderId: string): Promise<DeliveryNotificationResult> {
+  return apiFetch(`/api/deliveries/${encodeURIComponent(orderId)}/notify`, {
+    method: "POST",
   });
 }

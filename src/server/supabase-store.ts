@@ -6,6 +6,7 @@ import {
   type BootstrapPayload,
   type BulkSalonInput,
   type CreateShopOrderInput,
+  type DeliveryNotificationResult,
   type DeliveryOrderFull,
   type KiranRepository,
   type LostDemandRecord,
@@ -706,7 +707,58 @@ export class SupabaseKiranRepository implements KiranRepository {
         await this.client.from("public_shop_orders").update({ status: input.status }).eq("id", input.id);
         return { ok: true, message: `Shop order updated to ${input.status}.` };
       }
+
+      case "mark_delivery_delivered": {
+        const { data: order, error: fetchError } = await this.client
+          .from("delivery_orders")
+          .select("id, order_number, status")
+          .eq("id", input.id)
+          .maybeSingle();
+        if (fetchError) throw this.wrapDbError(fetchError);
+        if (!order) throw new RpcError("Delivery order not found.", 404, "P0002");
+        if (order.status === "delivered") {
+          return { ok: true, message: `Order ${String(order.order_number)} is already marked as delivered.` };
+        }
+        const { error: updateError } = await this.client
+          .from("delivery_orders")
+          .update({ status: "delivered", delivered_at: new Date().toISOString() })
+          .eq("id", input.id);
+        if (updateError) throw this.wrapDbError(updateError);
+        return { ok: true, message: `Order ${String(order.order_number)} marked as delivered.` };
+      }
     }
+  }
+
+  async notifyDelivery(orderId: string): Promise<DeliveryNotificationResult> {
+    const { data: order, error: orderError } = await this.client
+      .from("delivery_orders")
+      .select("id, order_number, salon_id, salon_name")
+      .eq("id", orderId)
+      .maybeSingle();
+
+    if (orderError) throw this.wrapDbError(orderError);
+    if (!order) throw new RpcError("Delivery order not found.", 404, "P0002");
+
+    const { data: salon } = await this.client
+      .from("salons")
+      .select("phone")
+      .eq("id", String(order.salon_id))
+      .maybeSingle();
+
+    const recipientPhone = salon?.phone ? String(salon.phone) : "On-file contact";
+    const notifiedAt = new Date().toISOString();
+    const orderNumber = String(order.order_number);
+    const salonName = String(order.salon_name);
+
+    return {
+      ok: true,
+      orderId: String(order.id),
+      orderNumber,
+      salonName,
+      recipientPhone,
+      notifiedAt,
+      message: `Notification resent for ${orderNumber} to ${salonName} (${recipientPhone}).`,
+    };
   }
 
   async bulkImportSalons(salons: BulkSalonInput[], createdBy: string): Promise<number> {

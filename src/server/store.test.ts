@@ -191,3 +191,37 @@ test("getSalonActivity returns at most the last 5 confirmed orders for the selec
   assert.equal(activity.recentOrders[0]?.items[0]?.qty, 6);
   assert.equal(activity.recentOrders[4]?.items[0]?.qty, 2);
 });
+
+test("handleManagerApproval marks pending delivery as delivered and is idempotent", async () => {
+  const repo = new MemoryKiranRepository();
+
+  const res = await repo.handleManagerApproval({
+    action: "mark_delivery_delivered",
+    id: "ord-8801",
+  });
+  assert.equal(res.ok, true);
+
+  const boot = await repo.getBootstrap(repUser);
+  const ord = boot.orders.find((o) => o.id === "ord-8801")!;
+  assert.equal(ord.status, "delivered");
+  assert.ok(ord.delivered_at);
+
+  const replay = await repo.handleManagerApproval({
+    action: "mark_delivery_delivered",
+    id: "ord-8801",
+  });
+  assert.equal(replay.ok, true);
+});
+
+test("notifyDelivery returns formatted notification payload with salon recipient phone", async () => {
+  const repo = new MemoryKiranRepository();
+
+  const res = await repo.notifyDelivery("ord-8801");
+  assert.equal(res.ok, true);
+  assert.equal(res.orderId, "ord-8801");
+  assert.equal(res.orderNumber, "ORD-KRN-2026-8801");
+  assert.equal(res.salonName, "Toni&Guy Clifton Branch");
+  assert.equal(res.recipientPhone, "0300-8234190");
+  assert.ok(res.message.includes("ORD-KRN-2026-8801"));
+  assert.ok(res.message.includes("0300-8234190"));
+});
