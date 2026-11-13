@@ -99,6 +99,7 @@ export interface SalonWithApproval extends Salon {
 
 export interface DeliveryOrderFull extends DeliveryOrder {
   signature_data?: string | null;
+  created_at?: string | null;
 }
 
 export interface BootstrapPayload {
@@ -118,6 +119,7 @@ export interface SalonActivityPayload {
   visits: VisitRecord[];
   payments: PaymentRecord[];
   orderCards: OrderCardRecord[];
+  recentOrders: DeliveryOrderFull[];
 }
 
 export interface ManagerOverviewPayload {

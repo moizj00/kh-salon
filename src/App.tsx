@@ -1068,6 +1068,98 @@ export default function App() {
                         )}
                       </div>
                     </div>
+
+                    {/* Recent Confirmed Orders (Last 5) */}
+                    {(() => {
+                      const recentConfirmedOrders = (
+                        salonActivity
+                          ? salonActivity.recentOrders
+                          : orders.filter((o) => o.salon_id === currentSalon.id)
+                      ).slice(0, 5);
+
+                      return (
+                        <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <Package className="w-4 h-4 text-[#7a2e4a] dark:text-[#d77a9c]" />
+                              <h4 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
+                                Recent Orders
+                              </h4>
+                            </div>
+                            <span className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                              Last 5 confirmed orders
+                            </span>
+                          </div>
+
+                          {loadingActivity ? (
+                            <div className="py-6 text-center text-xs text-[#6b625e] dark:text-[#a59b96]">
+                              Loading recent orders...
+                            </div>
+                          ) : recentConfirmedOrders.length === 0 ? (
+                            <div className="py-6 text-center text-xs text-[#6b625e] dark:text-[#a59b96]">
+                              No confirmed orders for this salon yet.
+                            </div>
+                          ) : (
+                            <div className="divide-y divide-[#e6dfdb]/60 dark:divide-[#3a3330] text-xs">
+                              {recentConfirmedOrders.map((order) => {
+                                const timestamp = order.delivered_at || order.created_at;
+                                return (
+                                  <div
+                                    key={order.id}
+                                    className="py-3 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                                  >
+                                    <div className="space-y-1 min-w-0">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="font-mono text-[11px] font-semibold text-[#1d1a19] dark:text-[#f2eeec]">
+                                          {order.order_number}
+                                        </span>
+                                        <span
+                                          className={`text-[11px] font-semibold ${
+                                            order.status === "delivered"
+                                              ? "text-emerald-700 dark:text-emerald-400"
+                                              : "text-amber-700 dark:text-amber-300"
+                                          }`}
+                                        >
+                                          {order.status === "delivered" ? "Delivered" : "Confirmed · Pending Delivery"}
+                                        </span>
+                                      </div>
+
+                                      <div className="text-[#6b625e] dark:text-[#a59b96] truncate">
+                                        {order.items.map((it) => `${it.qty}x ${it.sku_name}`).join(" · ")}
+                                      </div>
+
+                                      {timestamp && (
+                                        <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                                          {order.status === "delivered" ? "Delivered" : "Confirmed"} {when(timestamp)}
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0">
+                                      <span className="font-bold text-xs tabular-nums text-[#7a2e4a] dark:text-[#d77a9c]">
+                                        PKR {order.total_amount.toLocaleString()}
+                                      </span>
+                                      {order.status === "pending_delivery" && (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setActiveTab("orders");
+                                            setSigningOrderId(order.id);
+                                          }}
+                                          className="px-2.5 py-1 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413] text-[11px] font-semibold hover:border-[#7a2e4a]"
+                                        >
+                                          Deliver
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 ) : (
                   <div className="space-y-3">

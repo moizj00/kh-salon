@@ -167,3 +167,27 @@ test("bulk salon import parses and registers salon records with custom credit li
   assert.equal(luxe.area, "DHA Phase 5");
   assert.equal(luxe.credit_limit, 60000);
 });
+
+test("getSalonActivity returns at most the last 5 confirmed orders for the selected salon", async () => {
+  const repo = new MemoryKiranRepository();
+
+  // Create and approve 6 order cards for sal-clifton-01 (which already has 1 seeded order = 7 total)
+  for (let i = 1; i <= 6; i++) {
+    const cardId = `crd-recent-${i}`;
+    await repo.executeRpc(repUser, "rep_create_card", {
+      p_id: cardId,
+      p_salon_id: "sal-clifton-01",
+      p_sku_id: "sku-arg-100",
+      p_qty: i,
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    await repo.handleManagerApproval({ action: "approve_order_card", id: cardId });
+  }
+
+  const activity = await repo.getSalonActivity("sal-clifton-01");
+  assert.equal(activity.recentOrders.length, 5);
+  assert.ok(activity.recentOrders.every((o) => o.salon_id === "sal-clifton-01"));
+  // Verify descending order (newest first, i.e., qty 6 down to qty 2)
+  assert.equal(activity.recentOrders[0]?.items[0]?.qty, 6);
+  assert.equal(activity.recentOrders[4]?.items[0]?.qty, 2);
+});

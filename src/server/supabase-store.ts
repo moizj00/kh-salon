@@ -449,13 +449,26 @@ export class SupabaseKiranRepository implements KiranRepository {
   }
 
   async getSalonActivity(salonId: string): Promise<SalonActivityPayload> {
-    const [{ data: salon }, { data: visits }, { data: payments }, { data: cards }] = await Promise.all([
+    const [
+      { data: salon, error: salonError },
+      { data: visits },
+      { data: payments },
+      { data: cards },
+      { data: recentOrders },
+    ] = await Promise.all([
       this.client.from("salons").select("*").eq("id", salonId).maybeSingle(),
       this.client.from("visits").select("*").eq("salon_id", salonId).order("captured_at", { ascending: false }),
       this.client.from("payments").select("*").eq("salon_id", salonId).order("captured_at", { ascending: false }),
       this.client.from("order_cards").select("*").eq("salon_id", salonId).order("captured_at", { ascending: false }),
+      this.client
+        .from("delivery_orders")
+        .select("*")
+        .eq("salon_id", salonId)
+        .order("created_at", { ascending: false })
+        .limit(5),
     ]);
 
+    if (salonError) throw this.wrapDbError(salonError);
     if (!salon) throw new RpcError(`Salon '${salonId}' not found.`, 404, "P0002");
 
     return {
@@ -488,6 +501,7 @@ export class SupabaseKiranRepository implements KiranRepository {
         status: c.status as OrderCardRecord["status"],
         capturedAt: String(c.captured_at),
       })),
+      recentOrders: (recentOrders ?? []) as DeliveryOrderFull[],
     };
   }
 

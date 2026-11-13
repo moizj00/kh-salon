@@ -51,7 +51,11 @@ export class MemoryKiranRepository implements KiranRepository {
     }));
     this.route = clone(INITIAL_ROUTE);
     this.skus = clone(INITIAL_SKUS);
-    this.orders = INITIAL_ORDERS.map((o) => ({ ...o, signature_data: null }));
+    this.orders = INITIAL_ORDERS.map((o, idx) => ({
+      ...o,
+      signature_data: null,
+      created_at: idx === 0 ? "2026-11-10T10:00:00Z" : "2026-11-09T14:30:00Z",
+    }));
 
     // Seed baseline monthly operational records so stats & manager views are grounded
     this.visits.push(
@@ -470,11 +474,21 @@ export class MemoryKiranRepository implements KiranRepository {
     if (!salon) {
       throw new RpcError(`Salon '${salonId}' not found.`, 404, "P0002");
     }
+    const recentOrders = this.orders
+      .filter((o) => o.salon_id === salonId)
+      .sort((a, b) => {
+        const tA = a.created_at ? Date.parse(a.created_at) : 0;
+        const tB = b.created_at ? Date.parse(b.created_at) : 0;
+        return tB - tA;
+      })
+      .slice(0, 5);
+
     return {
       salon: clone(salon),
       visits: clone(this.visits.filter((v) => v.salonId === salonId)),
       payments: clone(this.payments.filter((p) => p.salonId === salonId)),
       orderCards: clone(this.orderCards.filter((c) => c.salonId === salonId)),
+      recentOrders: clone(recentOrders),
     };
   }
 
@@ -573,6 +587,7 @@ export class MemoryKiranRepository implements KiranRepository {
           status: "pending_delivery",
           delivered_at: null,
           signature_data: null,
+          created_at: new Date().toISOString(),
         });
         return { ok: true, message: `Order card converted to delivery ${orderNumber}.` };
       }
