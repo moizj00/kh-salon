@@ -11,6 +11,8 @@ export type Salon = {
   last_visited_at: string | null;
   notes_count: number;
   open_cards_count: number;
+  lat?: number;
+  lng?: number;
 };
 
 export type RouteStop = {
@@ -59,6 +61,8 @@ export const INITIAL_SALONS: Salon[] = [
     last_visited_at: "2026-11-08T09:30:00Z",
     notes_count: 4,
     open_cards_count: 1,
+    lat: 24.8138,
+    lng: 67.0299,
   },
   {
     id: "sal-dha-02",
@@ -73,6 +77,8 @@ export const INITIAL_SALONS: Salon[] = [
     last_visited_at: "2026-11-07T11:15:00Z",
     notes_count: 2,
     open_cards_count: 0,
+    lat: 24.7937,
+    lng: 67.0644,
   },
   {
     id: "sal-saddar-03",
@@ -87,6 +93,8 @@ export const INITIAL_SALONS: Salon[] = [
     last_visited_at: "2026-11-05T14:40:00Z",
     notes_count: 1,
     open_cards_count: 1,
+    lat: 24.8556,
+    lng: 67.0261,
   },
   {
     id: "sal-gulshan-04",
@@ -101,6 +109,8 @@ export const INITIAL_SALONS: Salon[] = [
     last_visited_at: "2026-11-09T10:00:00Z",
     notes_count: 3,
     open_cards_count: 0,
+    lat: 24.9204,
+    lng: 67.0942,
   },
   {
     id: "sal-tariq-05",
@@ -115,6 +125,8 @@ export const INITIAL_SALONS: Salon[] = [
     last_visited_at: null,
     notes_count: 0,
     open_cards_count: 0,
+    lat: 24.8716,
+    lng: 67.0598,
   },
 ];
 

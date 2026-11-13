@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { MemoryKiranRepository } from "./memory-store.ts";
-import { RpcError, type UserProfile } from "./types.ts";
+import { RpcError, type DeliveryOrderFull, type SalonWithApproval, type UserProfile } from "./types.ts";
+import { buildDeliveryOrdersCsv } from "../lib/csv.ts";
+import { buildLast30DaysDeliveryTrends } from "../lib/delivery-trends.ts";
+import { resolveSalonCoordinates } from "../lib/karachi-geo.ts";
 
 const repUser: UserProfile = {
   id: "rep-karachi-pilot-01",
@@ -246,4 +249,130 @@ test("handleManagerApproval marks multiple pending deliveries as delivered in on
   });
   assert.equal(replay.ok, true);
   assert.equal(replay.message, "Selected orders are already marked as delivered.");
+});
+
+test("buildDeliveryOrdersCsv formats filtered deliveries with RFC 4180 escaping and totals", () => {
+  const salons: SalonWithApproval[] = [
+    {
+      id: "sal-1",
+      name: 'Glam, "Studio" Clifton',
+      area: "Clifton Block 4",
+      address: "Plot 12",
+      phone: "0300-1112233",
+      contact_person: "Sana",
+      stage: "regular",
+      approval_status: "approved",
+      outstanding_balance: 0,
+      credit_limit: 50000,
+      last_visited_at: "2026-11-10T10:00:00.000Z",
+      notes_count: 1,
+      open_cards_count: 0,
+    },
+  ];
+  const orders: DeliveryOrderFull[] = [
+    {
+      id: "ord-1",
+      order_number: "ORD-1",
+      salon_id: "sal-1",
+      salon_name: 'Glam, "Studio" Clifton',
+      items: [
+        { sku_name: "Argan Serum", qty: 2, price: 1500 },
+        { sku_name: "Keratin 1L", qty: 1, price: 5000 },
+      ],
+      total_amount: 8000,
+      status: "delivered",
+      delivered_at: "2026-11-12T12:00:00.000Z",
+      signature_data: "data:image/png;base64,XYZ",
+    },
+    {
+      id: "ord-2",
+      order_number: "=SUM(A1:A2)",
+      salon_id: "sal-missing",
+      salon_name: "Test Salon",
+      items: [{ sku_name: "Serum", qty: 3, price: 1000 }],
+      total_amount: 3000,
+      status: "pending_delivery",
+      delivered_at: null,
+    },
+  ];
+
+  const csv = buildDeliveryOrdersCsv(orders, salons);
+  const lines = csv.split("\r\n");
+  assert.equal(lines.length, 3);
+  assert.ok(lines[0]?.startsWith("Order Number,Order ID,Salon Name"));
+  assert.ok(lines[1]?.includes('"Glam, ""Studio"" Clifton"'));
+  assert.ok(lines[1]?.includes("3,8000"));
+  assert.ok(lines[1]?.includes("Digital Signature"));
+  assert.ok(lines[2]?.startsWith("'=SUM(A1:A2)"));
+});
+
+test("buildLast30DaysDeliveryTrends produces 30 daily buckets and completion metrics", () => {
+  const ref = new Date("2026-11-15T12:00:00.000Z");
+  const sampleOrders: DeliveryOrderFull[] = [
+    {
+      id: "ord-d1",
+      order_number: "ORD-D1",
+      salon_id: "sal-1",
+      salon_name: "Salon One",
+      items: [],
+      total_amount: 12000,
+      status: "delivered",
+      delivered_at: "2026-11-14T09:00:00.000Z",
+    },
+    {
+      id: "ord-d2",
+      order_number: "ORD-D2",
+      salon_id: "sal-2",
+      salon_name: "Salon Two",
+      items: [],
+      total_amount: 8000,
+      status: "delivered",
+      delivered_at: "2026-11-14T15:00:00.000Z",
+    },
+    {
+      id: "ord-p1",
+      order_number: "ORD-P1",
+      salon_id: "sal-3",
+      salon_name: "Salon Three",
+      items: [],
+      total_amount: 5000,
+      status: "pending_delivery",
+      delivered_at: null,
+      created_at: "2026-11-15T08:00:00.000Z",
+    },
+  ];
+
+  const summary = buildLast30DaysDeliveryTrends(sampleOrders, ref);
+  assert.equal(summary.days.length, 30);
+  assert.equal(summary.totalDelivered30d, 2);
+  assert.equal(summary.totalPending30d, 1);
+  assert.equal(summary.completionRatePct, 67);
+
+  const nov14 = summary.days.find((d) => d.dateKey === "2026-11-14");
+  assert.equal(nov14?.deliveredCount, 2);
+  assert.equal(nov14?.completedRevenuePkr, 20000);
+
+  const nov15 = summary.days.find((d) => d.dateKey === "2026-11-15");
+  assert.equal(nov15?.pendingCount, 1);
+});
+
+test("resolveSalonCoordinates honors explicit coords and resolves Karachi zone fallbacks", () => {
+  const explicit = resolveSalonCoordinates({
+    id: "sal-explicit",
+    name: "Custom",
+    area: "DHA",
+    address: "DHA",
+    lat: 24.8012,
+    lng: 67.0511,
+  });
+  assert.deepEqual(explicit, { lat: 24.8012, lng: 67.0511 });
+
+  const inferred = resolveSalonCoordinates({
+    id: "sal-gulshan",
+    name: "Gulshan Salon",
+    area: "Gulshan-e-Iqbal Block 7",
+    address: "University Road, Karachi",
+  });
+  assert.ok(inferred.lat >= 24.7 && inferred.lat <= 25.1);
+  assert.ok(inferred.lng >= 66.9 && inferred.lng <= 67.3);
 });

@@ -4,6 +4,7 @@ import {
   Check,
   ClipboardCheck,
   Coins,
+  Download,
   FileSpreadsheet,
   Package,
   RefreshCw,
@@ -13,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { fetchManagerOverview, resendDeliveryNotification, submitManagerApproval } from "../lib/api";
+import { downloadDeliveryOrdersCsv } from "../lib/csv";
 import { when } from "../lib/time";
 import type {
   DeliveryOrderFull,
@@ -27,6 +29,7 @@ import {
   DeliveryQuickActionsMenu,
   DeliveryReceiptModal,
 } from "./delivery-actions";
+import { DeliveryTrendsChart } from "./delivery-trends-chart";
 import { SalonBulkImportModal } from "./salon-bulk-import-modal";
 
 interface ManagerDashboardProps {
@@ -613,7 +616,10 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
 
       {/* ================= SECTION 3: SHOP & DELIVERIES ================= */}
       {section === "orders" && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="space-y-4">
+          <DeliveryTrendsChart orders={data.deliveryOrders} />
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Public Storefront Orders */}
           <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
             <div className="flex items-center justify-between">
@@ -765,32 +771,54 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                       </span>
                     </div>
 
-                    <div
-                      role="group"
-                      aria-label="Filter salon delivery ledger by status"
-                      className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#f1eae6] dark:bg-[#2a2523] border border-[#e6dfdb] dark:border-[#3a3330]"
-                    >
-                      {(
-                        [
-                          { id: "all", label: `All (${allCount})` },
-                          { id: "pending_delivery", label: `Pending (${pendingCount})` },
-                          { id: "delivered", label: `Delivered (${deliveredCount})` },
-                        ] as const
-                      ).map((opt) => (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          aria-pressed={deliveryFilter === opt.id}
-                          onClick={() => setDeliveryFilter(opt.id)}
-                          className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition-colors tabular-nums ${
-                            deliveryFilter === opt.id
-                              ? "bg-white dark:bg-[#171413] text-[#7a2e4a] dark:text-[#d77a9c] shadow-xs"
-                              : "text-[#6b625e] dark:text-[#a59b96] hover:text-[#1d1a19] dark:hover:text-[#f2eeec]"
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div
+                        role="group"
+                        aria-label="Filter salon delivery ledger by status"
+                        className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#f1eae6] dark:bg-[#2a2523] border border-[#e6dfdb] dark:border-[#3a3330]"
+                      >
+                        {(
+                          [
+                            { id: "all", label: `All (${allCount})` },
+                            { id: "pending_delivery", label: `Pending (${pendingCount})` },
+                            { id: "delivered", label: `Delivered (${deliveredCount})` },
+                          ] as const
+                        ).map((opt) => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            aria-pressed={deliveryFilter === opt.id}
+                            onClick={() => setDeliveryFilter(opt.id)}
+                            className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition-colors tabular-nums ${
+                              deliveryFilter === opt.id
+                                ? "bg-white dark:bg-[#171413] text-[#7a2e4a] dark:text-[#d77a9c] shadow-xs"
+                                : "text-[#6b625e] dark:text-[#a59b96] hover:text-[#1d1a19] dark:hover:text-[#f2eeec]"
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={filteredDeliveries.length === 0}
+                        onClick={() => {
+                          const filename = downloadDeliveryOrdersCsv(
+                            filteredDeliveries,
+                            data.salons,
+                            deliveryFilter,
+                          );
+                          showToast(
+                            `Exported ${filteredDeliveries.length} delivery order${filteredDeliveries.length === 1 ? "" : "s"} to ${filename}.`,
+                            "ok",
+                          );
+                        }}
+                        className="min-h-[38px] px-3 py-1.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-white dark:bg-[#171413] text-xs font-semibold flex items-center gap-1.5 hover:border-[#7a2e4a] disabled:opacity-45 whitespace-nowrap shrink-0 transition-colors"
+                      >
+                        <Download className="w-3.5 h-3.5 text-[#7a2e4a] dark:text-[#d77a9c]" />
+                        <span>Export CSV</span>
+                      </button>
                     </div>
                   </div>
 
@@ -951,6 +979,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                 </>
               );
             })()}
+          </div>
           </div>
         </div>
       )}

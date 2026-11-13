@@ -71,6 +71,10 @@ export async function getAuthConfig(): Promise<{ authConfigured: boolean; supaba
   return apiFetch("/api/auth/config");
 }
 
+export async function fetchMapsConfig(): Promise<{ apiKey: string }> {
+  return apiFetch("/api/maps/config");
+}
+
 export async function getGoogleOAuthUrl(): Promise<{ url: string; redirectUri: string }> {
   const origin = typeof window !== "undefined" ? encodeURIComponent(window.location.origin) : "";
   return apiFetch(`/api/auth/google-url?origin=${origin}`);

@@ -544,10 +544,11 @@ export class SupabaseKiranRepository implements KiranRepository {
   }
 
   async listShopOrders(): Promise<PublicShopOrder[]> {
-    const { data } = await this.client
+    const { data, error } = await this.client
       .from("public_shop_orders")
       .select("*")
       .order("created_at", { ascending: false });
+    if (error) throw this.wrapDbError(error);
     return (data ?? []).map((row) => this.mapShopOrder(row as Record<string, unknown>));
   }
 
@@ -573,6 +574,9 @@ export class SupabaseKiranRepository implements KiranRepository {
       this.client.from("skus").select("*").order("name"),
       this.computeStats(user),
     ]);
+
+    if (salonsRes.error) throw this.wrapDbError(salonsRes.error);
+    if (deliveryRes.error) throw this.wrapDbError(deliveryRes.error);
 
     const salons = (salonsRes.data ?? []) as SalonWithApproval[];
     const salonNames = new Map(salons.map((s) => [s.id, s.name]));

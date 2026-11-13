@@ -44,6 +44,7 @@ import {
   DeliveryQuickActionsMenu,
   DeliveryReceiptModal,
 } from "./components/delivery-actions";
+import { DeliveryMapView } from "./components/delivery-map-view";
 import { ManagerDashboard } from "./components/manager-dashboard";
 import { BottomNavigation, type TabKey } from "./components/navigation";
 import { OutboxStatus } from "./components/outbox-status";
@@ -69,6 +70,7 @@ import {
   Coins,
   FileText,
   History,
+  List,
   LogOut,
   MapPin,
   Package,
@@ -146,10 +148,18 @@ export default function App() {
   const [confirmDeliverOrder, setConfirmDeliverOrder] = useState<DeliveryOrderFull | null>(null);
   const [markingDelivered, setMarkingDelivered] = useState(false);
   const [notifyingOrderId, setNotifyingOrderId] = useState<string | null>(null);
+  const [deliveryViewMode, setDeliveryViewMode] = useState<"list" | "map">("list");
+  const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState(false);
 
   // Feedback notifications / toasts
   const [toast, setToast] = useState<{ message: string; type: "ok" | "info" | "warn" } | null>(null);
   const lastSyncRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const handleQuotaExceeded = () => setMapsQuotaExceeded(true);
+    window.addEventListener("gmp-quota-exceeded", handleQuotaExceeded);
+    return () => window.removeEventListener("gmp-quota-exceeded", handleQuotaExceeded);
+  }, []);
 
   const showToast = useCallback((message: string, type: "ok" | "info" | "warn" = "ok") => {
     setToast({ message, type });
@@ -696,6 +706,24 @@ export default function App() {
         workspaceMode === "rep" ? "pb-20" : "pb-8"
       }`}
     >
+      {/* Google Maps Demo Quota Warning Banner */}
+      {mapsQuotaExceeded && (
+        <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
+          <span>
+            Google Maps Platform quota reached. If you are the app owner, visit{" "}
+            <a
+              href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-semibold text-amber-950 hover:text-amber-800"
+            >
+              maps developer site
+            </a>{" "}
+            for instructions to update your account.
+          </span>
+        </div>
+      )}
+
       {/* Top Bar Contract (single compact row) */}
       <header className="sticky top-0 z-30 bg-white/95 dark:bg-[#211d1b]/95 backdrop-blur-md border-b border-[#e6dfdb] dark:border-[#3a3330]">
         <div className="max-w-md md:max-w-5xl mx-auto px-4 h-13 flex items-center justify-between gap-4">
@@ -1442,32 +1470,61 @@ export default function App() {
                         </div>
 
                         {!signingOrderId && (
-                          <div
-                            role="group"
-                            aria-label="Filter delivery orders by status"
-                            className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#f1eae6] dark:bg-[#2a2523] border border-[#e6dfdb] dark:border-[#3a3330]"
-                          >
-                            {(
-                              [
-                                { id: "all", label: `All (${allCount})` },
-                                { id: "pending_delivery", label: `Pending (${pendingCount})` },
-                                { id: "delivered", label: `Delivered (${deliveredCount})` },
-                              ] as const
-                            ).map((opt) => (
-                              <button
-                                key={opt.id}
-                                type="button"
-                                aria-pressed={deliveryFilter === opt.id}
-                                onClick={() => setDeliveryFilter(opt.id)}
-                                className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition-colors tabular-nums ${
-                                  deliveryFilter === opt.id
-                                    ? "bg-white dark:bg-[#171413] text-[#7a2e4a] dark:text-[#d77a9c] shadow-xs"
-                                    : "text-[#6b625e] dark:text-[#a59b96] hover:text-[#1d1a19] dark:hover:text-[#f2eeec]"
-                                }`}
+                          <div className="flex flex-wrap items-center gap-2">
+                            {deliveryViewMode === "list" && (
+                              <div
+                                role="group"
+                                aria-label="Filter delivery orders by status"
+                                className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#f1eae6] dark:bg-[#2a2523] border border-[#e6dfdb] dark:border-[#3a3330]"
                               >
-                                {opt.label}
-                              </button>
-                            ))}
+                                {(
+                                  [
+                                    { id: "all", label: `All (${allCount})` },
+                                    { id: "pending_delivery", label: `Pending (${pendingCount})` },
+                                    { id: "delivered", label: `Delivered (${deliveredCount})` },
+                                  ] as const
+                                ).map((opt) => (
+                                  <button
+                                    key={opt.id}
+                                    type="button"
+                                    aria-pressed={deliveryFilter === opt.id}
+                                    onClick={() => setDeliveryFilter(opt.id)}
+                                    className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition-colors tabular-nums ${
+                                      deliveryFilter === opt.id
+                                        ? "bg-white dark:bg-[#171413] text-[#7a2e4a] dark:text-[#d77a9c] shadow-xs"
+                                        : "text-[#6b625e] dark:text-[#a59b96] hover:text-[#1d1a19] dark:hover:text-[#f2eeec]"
+                                    }`}
+                                  >
+                                    {opt.label}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+
+                            <button
+                              type="button"
+                              aria-pressed={deliveryViewMode === "map"}
+                              onClick={() =>
+                                setDeliveryViewMode((prev) => (prev === "list" ? "map" : "list"))
+                              }
+                              className={`min-h-[40px] px-3.5 py-2 rounded-xl border text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors ${
+                                deliveryViewMode === "map"
+                                  ? "bg-[#7a2e4a] text-white border-[#7a2e4a]"
+                                  : "bg-white dark:bg-[#211d1b] border-[#e6dfdb] dark:border-[#3a3330] text-[#1d1a19] dark:text-[#f2eeec] hover:border-[#7a2e4a]"
+                              }`}
+                            >
+                              {deliveryViewMode === "map" ? (
+                                <>
+                                  <List className="w-3.5 h-3.5" />
+                                  <span>List View</span>
+                                </>
+                              ) : (
+                                <>
+                                  <MapPin className="w-3.5 h-3.5 text-[#7a2e4a] dark:text-[#d77a9c]" />
+                                  <span className="tabular-nums">Map View ({pendingCount})</span>
+                                </>
+                              )}
+                            </button>
                           </div>
                         )}
                       </div>
@@ -1496,7 +1553,7 @@ export default function App() {
                             )}
                           </div>
 
-                          {isManager && (
+                          {isManager && deliveryViewMode === "list" && (
                             <DeliveryBulkBar
                               checkboxId="rep-deliveries-select-all"
                               visiblePendingCount={visiblePendingIds.length}
@@ -1544,6 +1601,17 @@ export default function App() {
                             ) : null;
                           })()}
                         </div>
+                      ) : deliveryViewMode === "map" ? (
+                        <DeliveryMapView
+                          orders={searchedOrders}
+                          salons={salons}
+                          onSelectDeliver={(orderId) => {
+                            setDeliveryViewMode("list");
+                            setSigningOrderId(orderId);
+                          }}
+                          onViewReceipt={(o) => setReceiptOrder(o)}
+                          onSwitchToList={() => setDeliveryViewMode("list")}
+                        />
                       ) : filteredOrders.length === 0 ? (
                         <div className="p-8 rounded-2xl bg-white dark:bg-[#211d1b] border border-dashed border-[#e6dfdb] dark:border-[#3a3330] text-center space-y-2.5">
                           <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
