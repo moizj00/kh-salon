@@ -2,9 +2,36 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { MemoryKiranRepository } from "./memory-store.ts";
 import { RpcError, type DeliveryOrderFull, type SalonWithApproval, type UserProfile } from "./types.ts";
+import { INITIAL_SALONS, INITIAL_SKUS } from "../lib/data.ts";
 import { buildDeliveryOrdersCsv } from "../lib/csv.ts";
 import { buildLast30DaysDeliveryTrends } from "../lib/delivery-trends.ts";
 import { resolveSalonCoordinates } from "../lib/karachi-geo.ts";
+import { sortSalons } from "../lib/salon-sort.ts";
+import { computeManagerQuickSnapshot } from "../lib/manager-snapshot.ts";
+import { buildDeliveryMapStops, getDeliveryPinStyle } from "../lib/delivery-map-stops.ts";
+import { checkOrderIntakeStock, DEFAULT_LOW_STOCK_THRESHOLD } from "../lib/order-stock.ts";
+import {
+  buildDeliveryReceiptPdfModel,
+  createDeliveryReceiptPdfDocument,
+} from "../lib/receipt-pdf.ts";
+import { summarizeSelectedOrderCards } from "../lib/order-card-bulk.ts";
+import { INITIAL_ROUTE } from "../lib/data.ts";
+import {
+  buildOfflineRouteSnapshot,
+  buildTileUrl,
+  computeRouteBounds,
+  enumerateRouteTileCoords,
+  isOfflineSnapshotExpired,
+  MAX_ROUTE_CACHE_AGE_MS,
+  projectLatLngToViewport,
+  selectOptimalTileZoom,
+} from "../lib/offline-map-cache.ts";
+import {
+  applyStoredRouteOrder,
+  haversineDistanceKm,
+  optimizeRouteStops,
+} from "../lib/route-optimizer.ts";
+import { filterOrderSkus } from "../lib/order-sku-search.ts";
 
 const repUser: UserProfile = {
   id: "rep-karachi-pilot-01",
@@ -376,3 +403,454 @@ test("resolveSalonCoordinates honors explicit coords and resolves Karachi zone f
   assert.ok(inferred.lat >= 24.7 && inferred.lat <= 25.1);
   assert.ok(inferred.lng >= 66.9 && inferred.lng <= 67.3);
 });
+
+test("sortSalons orders by Name (A-Z), Last Visited (recent first, unvisited last), and Outstanding Balance (highest first)", () => {
+  const byName = sortSalons(INITIAL_SALONS, "name_asc");
+  assert.deepEqual(
+    byName.map((s) => s.name),
+    [
+      "Glamour Zone Tariq Road",
+      "Karachi Looks Beauty Lounge",
+      "Peng's Hair Studio DHA",
+      "Saba's Herbal & Hair Care",
+      "Toni&Guy Clifton Branch",
+    ],
+  );
+
+  const byLastVisited = sortSalons(INITIAL_SALONS, "last_visited");
+  assert.deepEqual(
+    byLastVisited.map((s) => s.id),
+    [
+      "sal-gulshan-04", // 2026-11-09
+      "sal-clifton-01", // 2026-11-08
+      "sal-dha-02",     // 2026-11-07
+      "sal-saddar-03",  // 2026-11-05
+      "sal-tariq-05",   // null -> placed at bottom
+    ],
+  );
+
+  const byBalance = sortSalons(INITIAL_SALONS, "balance_desc");
+  assert.deepEqual(
+    byBalance.map((s) => s.id),
+    [
+      "sal-clifton-01", // 45000
+      "sal-dha-02",     // 28500
+      "sal-saddar-03",  // 14000
+      "sal-tariq-05",   // 0 (tie-broken alphabetically: Glamour Zone before Saba's)
+      "sal-gulshan-04", // 0
+    ],
+  );
+});
+
+test("Order Intake Card optional notes persist on card, propagate to delivery order, and export in CSV", async () => {
+  const repo = new MemoryKiranRepository();
+
+  const cardWithNotes = await repo.executeRpc(repUser, "rep_create_card", {
+    p_id: "crd-notes-1",
+    p_salon_id: "sal-clifton-01",
+    p_sku_id: "sku-krt-500",
+    p_qty: 2,
+    p_notes: "  Deliver before 2 PM to Madam Farida  ",
+  });
+  assert.equal(cardWithNotes.notes, "Deliver before 2 PM to Madam Farida");
+
+  const cardWithoutNotes = await repo.executeRpc(repUser, "rep_create_card", {
+    p_id: "crd-notes-2",
+    p_salon_id: "sal-dha-02",
+    p_sku_id: "sku-arg-100",
+    p_qty: 1,
+  });
+  assert.equal(cardWithoutNotes.notes, null);
+
+  const activityBefore = await repo.getSalonActivity("sal-clifton-01");
+  assert.equal(activityBefore.orderCards[0]?.notes, "Deliver before 2 PM to Madam Farida");
+
+  await repo.handleManagerApproval({ action: "approve_order_card", id: "crd-notes-1" });
+  const overview = await repo.getManagerOverview(repUser);
+  const converted = overview.deliveryOrders.find(
+    (o) => o.salon_id === "sal-clifton-01" && o.notes === "Deliver before 2 PM to Madam Farida",
+  );
+  assert.ok(converted);
+
+  const csv = buildDeliveryOrdersCsv([converted], overview.salons);
+  const lines = csv.split("\r\n");
+  assert.ok(lines[0]?.endsWith(",Delivery Notes"));
+  assert.ok(lines[1]?.endsWith(",Deliver before 2 PM to Madam Farida"));
+});
+
+test("computeManagerQuickSnapshot aggregates pending deliveries and outstanding balances across all salons", async () => {
+  const repo = new MemoryKiranRepository();
+  const overview = await repo.getManagerOverview(repUser);
+
+  const initialSnapshot = computeManagerQuickSnapshot(INITIAL_SALONS, overview.deliveryOrders);
+  assert.equal(initialSnapshot.totalPendingDeliveries, 2);
+  assert.equal(initialSnapshot.totalDeliveredCount, 0);
+  assert.equal(initialSnapshot.pendingDeliveriesValuePkr, 33000);
+  assert.equal(initialSnapshot.totalOutstandingBalancePkr, 87500);
+  assert.equal(initialSnapshot.salonsWithBalanceCount, 3);
+  assert.equal(initialSnapshot.totalSalonsCount, 5);
+
+  await repo.handleManagerApproval({ action: "mark_delivery_delivered", id: "ord-8801" });
+  const updatedOverview = await repo.getManagerOverview(repUser);
+  const updatedSnapshot = computeManagerQuickSnapshot(updatedOverview.salons, updatedOverview.deliveryOrders);
+  assert.equal(updatedSnapshot.totalPendingDeliveries, 1);
+  assert.equal(updatedSnapshot.totalDeliveredCount, 1);
+});
+
+test("getDeliveryPinStyle distinguishes pending and delivered pins and buildDeliveryMapStops separates co-located orders", () => {
+  const pendingStyle = getDeliveryPinStyle("pending_delivery", false);
+  const deliveredStyle = getDeliveryPinStyle("delivered", false);
+  const selectedPendingStyle = getDeliveryPinStyle("pending_delivery", true);
+  const selectedDeliveredStyle = getDeliveryPinStyle("delivered", true);
+
+  assert.notEqual(pendingStyle.background, deliveredStyle.background);
+  assert.equal(pendingStyle.label, "Pending Delivery");
+  assert.equal(deliveredStyle.label, "Delivered");
+  assert.notEqual(selectedPendingStyle.background, pendingStyle.background);
+  assert.notEqual(selectedDeliveredStyle.background, deliveredStyle.background);
+
+  const orders: DeliveryOrderFull[] = [
+    {
+      id: "ord-p1",
+      order_number: "ORD-P1",
+      salon_id: "sal-clifton-01",
+      salon_name: "Toni&Guy Clifton Branch",
+      items: [{ sku_name: "Argan Serum", qty: 2, price: 1500 }],
+      total_amount: 3000,
+      status: "pending_delivery",
+      delivered_at: null,
+    },
+    {
+      id: "ord-d1",
+      order_number: "ORD-D1",
+      salon_id: "sal-clifton-01",
+      salon_name: "Toni&Guy Clifton Branch",
+      items: [{ sku_name: "Keratin 1L", qty: 1, price: 5000 }],
+      total_amount: 5000,
+      status: "delivered",
+      delivered_at: "2026-11-12T10:00:00.000Z",
+    },
+    {
+      id: "ord-p2",
+      order_number: "ORD-P2",
+      salon_id: "sal-dha-02",
+      salon_name: "Peng's Hair Studio DHA",
+      items: [{ sku_name: "Shampoo", qty: 4, price: 1000 }],
+      total_amount: 4000,
+      status: "pending_delivery",
+      delivered_at: null,
+    },
+  ];
+
+  const stops = buildDeliveryMapStops(orders, INITIAL_SALONS);
+  assert.equal(stops.length, 3);
+  assert.equal(stops[0]?.pendingStopNumber, 1);
+  assert.equal(stops[1]?.pendingStopNumber, null);
+  assert.equal(stops[2]?.pendingStopNumber, 2);
+
+  // Co-located orders at sal-clifton-01 get distinct non-overlapping coordinates
+  assert.notDeepEqual(stops[0]?.position, stops[1]?.position);
+  assert.equal(
+    Number((stops[1]!.position.lat - stops[0]!.position.lat).toFixed(6)),
+    0.00045,
+  );
+});
+
+test("checkOrderIntakeStock detects when requested SKU quantity exceeds current bag stock", () => {
+  const keratinId = "sku-krt-500"; // bag_qty: 8
+
+  const within = checkOrderIntakeStock(INITIAL_SKUS, keratinId, 5);
+  assert.equal(within.availableStock, 8);
+  assert.equal(within.exceedsStock, false);
+  assert.equal(within.shortfall, 0);
+
+  const exact = checkOrderIntakeStock(INITIAL_SKUS, keratinId, 8);
+  assert.equal(exact.exceedsStock, false);
+  assert.equal(exact.shortfall, 0);
+
+  const exceeded = checkOrderIntakeStock(INITIAL_SKUS, keratinId, 11);
+  assert.equal(exceeded.exceedsStock, true);
+  assert.equal(exceeded.shortfall, 3);
+  assert.equal(exceeded.unitLabel, "Bottles");
+
+  const emptyStock = checkOrderIntakeStock(
+    [{ ...INITIAL_SKUS[0]!, bag_qty: 0 }],
+    keratinId,
+    1,
+  );
+  assert.equal(emptyStock.availableStock, 0);
+  assert.equal(emptyStock.exceedsStock, true);
+  assert.equal(emptyStock.shortfall, 1);
+  assert.equal(emptyStock.isOutOfStock, true);
+  assert.equal(emptyStock.isLowStock, false);
+  assert.equal(emptyStock.isBelowThreshold, true);
+
+  // Predefined threshold checks (DEFAULT_LOW_STOCK_THRESHOLD = 7)
+  assert.equal(DEFAULT_LOW_STOCK_THRESHOLD, 7);
+  const atThreshold = checkOrderIntakeStock(
+    [{ ...INITIAL_SKUS[0]!, bag_qty: DEFAULT_LOW_STOCK_THRESHOLD }],
+    keratinId,
+    1,
+  );
+  assert.equal(atThreshold.isLowStock, false);
+  assert.equal(atThreshold.isBelowThreshold, false);
+
+  const belowThreshold = checkOrderIntakeStock(INITIAL_SKUS, "sku-msk-500", 2); // bag_qty: 5
+  assert.equal(belowThreshold.availableStock, 5);
+  assert.equal(belowThreshold.exceedsStock, false);
+  assert.equal(belowThreshold.isLowStock, true);
+  assert.equal(belowThreshold.isBelowThreshold, true);
+  assert.equal(belowThreshold.lowStockThreshold, DEFAULT_LOW_STOCK_THRESHOLD);
+});
+
+test("buildDeliveryReceiptPdfModel and createDeliveryReceiptPdfDocument build valid client-side PDF", () => {
+  const order: DeliveryOrderFull = {
+    id: "ord-pdf-1",
+    order_number: "ORD/KRN 2026-9901",
+    salon_id: "sal-clifton-01",
+    salon_name: "Toni&Guy Clifton Branch",
+    items: [
+      { sku_name: "Kiran Brazilian Keratin Complex 500ml", qty: 2, price: 6800 },
+      { sku_name: "Moroccan Argan Elixir Serum 100ml", qty: 4, price: 2450 },
+    ],
+    total_amount: 23400,
+    status: "delivered",
+    delivered_at: "2026-11-12T10:30:00.000Z",
+    notes: "Leave parcel at reception desk with Ayesha.",
+    signature_data: "data:image/png;base64,ABC...[sealed]",
+  };
+  const salon = INITIAL_SALONS.find((s) => s.id === "sal-clifton-01")!;
+
+  const model = buildDeliveryReceiptPdfModel(order, salon);
+  assert.equal(model.filename, "Kiran-Receipt-ORD-KRN-2026-9901.pdf");
+  assert.equal(model.statusLabel, "Delivered");
+  assert.equal(model.acknowledgementLabel, "Customer digital signature attached");
+  assert.equal(model.invoiceTotalFormatted, "PKR 23,400");
+  assert.equal(model.items.length, 2);
+  assert.equal(model.items[0]?.lineTotalFormatted, "PKR 13,600");
+  assert.equal(model.notes, "Leave parcel at reception desk with Ayesha.");
+
+  const { doc } = createDeliveryReceiptPdfDocument(order, salon);
+  const pdfOutput = doc.output("datauristring");
+  assert.ok(pdfOutput.startsWith("data:application/pdf"));
+  const rawPdf = doc.output();
+  assert.ok(rawPdf.startsWith("%PDF-"));
+});
+
+test("summarizeSelectedOrderCards and bulk_process_order_cards support simultaneous approval and rejection", async () => {
+  const repo = new MemoryKiranRepository();
+
+  await repo.executeRpc(repUser, "rep_create_card", {
+    p_id: "crd-bulk-1",
+    p_salon_id: "sal-clifton-01",
+    p_sku_id: "sku-krt-500",
+    p_qty: 2,
+    p_notes: "Morning drop-off",
+  });
+  await repo.executeRpc(repUser, "rep_create_card", {
+    p_id: "crd-bulk-2",
+    p_salon_id: "sal-dha-02",
+    p_sku_id: "sku-arg-100",
+    p_qty: 3,
+  });
+  await repo.executeRpc(repUser, "rep_create_card", {
+    p_id: "crd-bulk-3",
+    p_salon_id: "sal-gulshan-04",
+    p_sku_id: "sku-shm-1000",
+    p_qty: 1,
+  });
+
+  const before = await repo.getManagerOverview(repUser);
+  const summary = summarizeSelectedOrderCards(before.pendingOrderCards, [
+    "crd-bulk-1",
+    "crd-bulk-2",
+  ]);
+  assert.equal(summary.selectedCount, 2);
+  assert.equal(summary.totalUnits, 5);
+  assert.equal(summary.totalAmountPkr, 2 * 6800 + 3 * 2450);
+  assert.equal(summary.distinctSalonsCount, 2);
+
+  // Bulk approve two cards at once
+  const approveRes = await repo.handleManagerApproval({
+    action: "bulk_process_order_cards",
+    ids: ["crd-bulk-1", "crd-bulk-2"],
+    decision: "approve",
+  });
+  assert.equal(approveRes.ok, true);
+  assert.equal(approveRes.message, "2 order intake cards approved and converted to delivery.");
+
+  const afterApprove = await repo.getManagerOverview(repUser);
+  assert.equal(afterApprove.deliveryOrders.length, 4); // 2 initial + 2 bulk approved
+  const ids = new Set(afterApprove.deliveryOrders.map((o) => o.id));
+  const orderNumbers = new Set(afterApprove.deliveryOrders.map((o) => o.order_number));
+  assert.equal(ids.size, 4);
+  assert.equal(orderNumbers.size, 4);
+  assert.ok(afterApprove.deliveryOrders.some((o) => o.notes === "Morning drop-off"));
+  assert.equal(afterApprove.pendingOrderCards.some((c) => c.id === "crd-bulk-1"), false);
+  assert.equal(afterApprove.pendingOrderCards.some((c) => c.id === "crd-bulk-2"), false);
+
+  // Idempotent replay
+  const replayRes = await repo.handleManagerApproval({
+    action: "bulk_process_order_cards",
+    ids: ["crd-bulk-1", "crd-bulk-2"],
+    decision: "approve",
+  });
+  assert.equal(replayRes.ok, true);
+  assert.equal(replayRes.message, "Selected order intake cards are already processed.");
+
+  // Bulk reject remaining two pending cards (crd-seed-01 + crd-bulk-3)
+  const rejectRes = await repo.handleManagerApproval({
+    action: "bulk_process_order_cards",
+    ids: ["crd-seed-01", "crd-bulk-3"],
+    decision: "reject",
+  });
+  assert.equal(rejectRes.ok, true);
+  assert.equal(rejectRes.message, "2 order intake cards declined.");
+
+  const afterReject = await repo.getManagerOverview(repUser);
+  assert.equal(afterReject.pendingOrderCards.length, 0);
+  assert.equal(afterReject.deliveryOrders.length, 4); // unchanged by rejection
+});
+
+test("offline-map-cache computes route bounds, OSM tiles, viewport projection, and 30-day TTL", () => {
+  const stops = buildDeliveryMapStops(
+    [
+      {
+        id: "ord-1",
+        order_number: "ORD-1",
+        salon_id: "sal-clifton-01",
+        salon_name: "Toni&Guy Clifton Branch",
+        items: [{ sku_name: "Keratin", qty: 2, price: 6800 }],
+        total_amount: 13600,
+        status: "pending_delivery",
+        delivered_at: null,
+      },
+      {
+        id: "ord-2",
+        order_number: "ORD-2",
+        salon_id: "sal-dha-02",
+        salon_name: "Peng's Hair Studio DHA",
+        items: [{ sku_name: "Shampoo", qty: 1, price: 3200 }],
+        total_amount: 3200,
+        status: "delivered",
+        delivered_at: "2026-11-12T10:00:00.000Z",
+      },
+    ],
+    INITIAL_SALONS,
+  );
+
+  const bounds = computeRouteBounds(stops.map((s) => s.position));
+  assert.ok(bounds.south < bounds.north);
+  assert.ok(bounds.west < bounds.east);
+
+  const zoom = selectOptimalTileZoom(bounds, 720, 380);
+  assert.ok(zoom >= 10 && zoom <= 14);
+
+  const tiles = enumerateRouteTileCoords(bounds, zoom, 1, 24);
+  assert.ok(tiles.length > 0 && tiles.length <= 24);
+  assert.match(buildTileUrl(tiles[0]!), /^https:\/\/tile\.openstreetmap\.org\/\d+\/\d+\/\d+\.png$/);
+
+  const projected = projectLatLngToViewport(
+    stops[0]!.position.lat,
+    stops[0]!.position.lng,
+    bounds,
+    zoom,
+    720,
+    380,
+  );
+  assert.ok(projected.x > 0 && projected.x < 720);
+  assert.ok(projected.y > 0 && projected.y < 380);
+
+  const now = new Date("2026-11-14T12:00:00.000Z");
+  const snapshot = buildOfflineRouteSnapshot(stops, tiles.length, now);
+  assert.equal(snapshot.stops.length, 2);
+  assert.equal(snapshot.cachedTileCount, tiles.length);
+  assert.equal(isOfflineSnapshotExpired(snapshot, now), false);
+  assert.equal(
+    isOfflineSnapshotExpired(snapshot, new Date(now.getTime() + MAX_ROUTE_CACHE_AGE_MS + 1000)),
+    true,
+  );
+});
+
+test("optimizeRouteStops reorders pending stops by shortest path from geolocation and preserves visited stops", () => {
+  const saddarToCliftonKm = haversineDistanceKm(
+    { lat: 24.8556, lng: 67.0261 },
+    { lat: 24.8138, lng: 67.0299 },
+  );
+  assert.ok(saddarToCliftonKm > 3 && saddarToCliftonKm < 6);
+
+  // Origin right next to DHA Phase 5 (sal-dha-02) should suggest DHA -> Clifton -> Tariq Road
+  const proposal = optimizeRouteStops({
+    route: INITIAL_ROUTE,
+    salons: INITIAL_SALONS,
+    origin: { lat: 24.7937, lng: 67.0644 },
+    originSource: "gps",
+    originLabel: "Current GPS",
+  });
+
+  assert.equal(proposal.hasChanges, true);
+  assert.ok(proposal.savedKm > 0);
+  assert.ok(proposal.optimizedPendingDistanceKm < proposal.originalPendingDistanceKm);
+  assert.deepEqual(
+    proposal.optimizedRoute.map((s) => s.id),
+    ["stop-02", "stop-01", "stop-03"],
+  );
+  assert.deepEqual(
+    proposal.optimizedRoute.map((s) => s.stop_number),
+    [1, 2, 3],
+  );
+
+  // Preserves visited stops ahead of pending stops
+  const withVisited = INITIAL_ROUTE.map((stop) =>
+    stop.id === "stop-01" ? { ...stop, status: "visited" as const } : stop,
+  );
+  const partialProposal = optimizeRouteStops({
+    route: withVisited,
+    salons: INITIAL_SALONS,
+    origin: { lat: 24.8716, lng: 67.0598 }, // near Tariq Road (stop-03)
+    originSource: "gps",
+    originLabel: "Current GPS",
+  });
+  assert.deepEqual(
+    partialProposal.optimizedRoute.map((s) => s.id),
+    ["stop-01", "stop-03", "stop-02"],
+  );
+
+  const restored = applyStoredRouteOrder(INITIAL_ROUTE, ["stop-02", "stop-01", "stop-03"]);
+  assert.deepEqual(
+    restored.map((s) => ({ id: s.id, num: s.stop_number })),
+    [
+      { id: "stop-02", num: 1 },
+      { id: "stop-01", num: 2 },
+      { id: "stop-03", num: 3 },
+    ],
+  );
+});
+
+test("filterOrderSkus matches products by name, category, SKU code, and multi-word queries", () => {
+  assert.equal(filterOrderSkus(INITIAL_SKUS, "").length, INITIAL_SKUS.length);
+  assert.equal(filterOrderSkus(INITIAL_SKUS, "   ").length, INITIAL_SKUS.length);
+
+  const byCategory = filterOrderSkus(INITIAL_SKUS, "treatment");
+  assert.equal(byCategory.length, 2);
+  assert.ok(byCategory.every((s) => s.category === "Treatment"));
+
+  const byName = filterOrderSkus(INITIAL_SKUS, "Argan");
+  assert.equal(byName.length, 1);
+  assert.equal(byName[0]?.id, "sku-arg-100");
+
+  const byCode = filterOrderSkus(INITIAL_SKUS, "krn-clr");
+  assert.equal(byCode.length, 1);
+  assert.equal(byCode[0]?.id, "sku-clr-06");
+
+  const multiToken = filterOrderSkus(INITIAL_SKUS, "treatment 500ml");
+  assert.equal(multiToken.length, 1);
+  assert.equal(multiToken[0]?.id, "sku-krt-500");
+
+  assert.equal(filterOrderSkus(INITIAL_SKUS, "nonexistent-item").length, 0);
+});
+
+
+
+
+

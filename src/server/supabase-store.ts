@@ -351,6 +351,8 @@ export class SupabaseKiranRepository implements KiranRepository {
         const salonId = String(args.p_salon_id ?? "");
         const skuId = String(args.p_sku_id ?? "");
         const qty = Number(args.p_qty ?? 1);
+        const rawNotes = args.p_notes ?? args.notes ?? "";
+        const notes = typeof rawNotes === "string" ? rawNotes.trim() || null : null;
         if (!Number.isFinite(qty) || qty <= 0) {
           throw new RpcError("Order quantity must be positive.", 422, "22023");
         }
@@ -372,6 +374,7 @@ export class SupabaseKiranRepository implements KiranRepository {
             sku_name: sku.name,
             qty,
             total_amount: total,
+            notes,
             status: "pending_approval",
             captured_at: at,
           });
@@ -381,7 +384,7 @@ export class SupabaseKiranRepository implements KiranRepository {
             .update({ open_cards_count: Number(salon.open_cards_count ?? 0) + 1 })
             .eq("id", salonId);
         }
-        return { id, salon_id: salonId, sku_id: skuId, qty, total_amount: total };
+        return { id, salon_id: salonId, sku_id: skuId, qty, total_amount: total, notes };
       }
 
       case "record_demand": {
@@ -499,6 +502,7 @@ export class SupabaseKiranRepository implements KiranRepository {
         skuName: String(c.sku_name),
         qty: Number(c.qty),
         totalAmount: Number(c.total_amount),
+        notes: c.notes ? String(c.notes) : null,
         status: c.status as OrderCardRecord["status"],
         capturedAt: String(c.captured_at),
       })),
@@ -594,6 +598,7 @@ export class SupabaseKiranRepository implements KiranRepository {
           skuName: String(c.sku_name),
           qty: Number(c.qty),
           totalAmount: Number(c.total_amount),
+          notes: c.notes ? String(c.notes) : null,
           status: c.status as OrderCardRecord["status"],
           capturedAt: String(c.captured_at),
         })),
@@ -672,6 +677,7 @@ export class SupabaseKiranRepository implements KiranRepository {
             },
           ],
           total_amount: card.total_amount,
+          notes: card.notes ? String(card.notes) : null,
           status: "pending_delivery",
         });
 
@@ -695,6 +701,87 @@ export class SupabaseKiranRepository implements KiranRepository {
           }
         }
         return { ok: true, message: "Order intake card declined." };
+      }
+
+      case "bulk_process_order_cards": {
+        const uniqueIds = Array.from(new Set(input.ids.filter((id) => typeof id === "string" && id.trim())));
+        if (uniqueIds.length === 0) {
+          throw new RpcError("Please select at least one order intake card.", 400, "22023");
+        }
+        const { data: cards, error: fetchErr } = await this.client
+          .from("order_cards")
+          .select("*")
+          .in("id", uniqueIds);
+        if (fetchErr) throw this.wrapDbError(fetchErr);
+        if (!cards || cards.length === 0) {
+          throw new RpcError("Selected order intake cards were not found.", 404, "P0002");
+        }
+        const pendingCards = cards.filter((c) => c.status === "pending_approval");
+        if (pendingCards.length === 0) {
+          return { ok: true, message: "Selected order intake cards are already processed." };
+        }
+
+        const nowMs = Date.now();
+        let processedCount = 0;
+
+        for (let idx = 0; idx < pendingCards.length; idx++) {
+          const card = pendingCards[idx];
+          const nextStatus = input.decision === "approve" ? "approved" : "rejected";
+          const { error: updateErr } = await this.client
+            .from("order_cards")
+            .update({ status: nextStatus })
+            .eq("id", card.id);
+          if (updateErr) throw this.wrapDbError(updateErr);
+
+          const { data: salon } = await this.client
+            .from("salons")
+            .select("id, name, open_cards_count")
+            .eq("id", card.salon_id)
+            .maybeSingle();
+
+          if (salon) {
+            await this.client
+              .from("salons")
+              .update({ open_cards_count: Math.max(0, Number(salon.open_cards_count ?? 1) - 1) })
+              .eq("id", salon.id);
+          }
+
+          if (input.decision === "approve") {
+            const { data: sku } = await this.client
+              .from("skus")
+              .select("price")
+              .eq("id", card.sku_id)
+              .maybeSingle();
+            const orderNumber = `ORD-KRN-${new Date().getFullYear()}-${String(nowMs + idx).slice(-4)}${Math.floor(10 + Math.random() * 90)}`;
+            const { error: insertErr } = await this.client.from("delivery_orders").insert({
+              id: `ord-${nowMs}-${idx + 1}`,
+              order_number: orderNumber,
+              salon_id: card.salon_id,
+              salon_name: salon?.name ?? "Salon",
+              items: [
+                {
+                  sku_name: card.sku_name,
+                  qty: card.qty,
+                  price: Number(sku?.price ?? Math.round(Number(card.total_amount) / Math.max(1, Number(card.qty)))),
+                },
+              ],
+              total_amount: card.total_amount,
+              notes: card.notes ? String(card.notes) : null,
+              status: "pending_delivery",
+            });
+            if (insertErr) throw this.wrapDbError(insertErr);
+          }
+
+          processedCount += 1;
+        }
+
+        return {
+          ok: true,
+          message:
+            input.decision === "approve"
+              ? `${processedCount} order intake ${processedCount === 1 ? "card" : "cards"} approved and converted to delivery.`
+              : `${processedCount} order intake ${processedCount === 1 ? "card" : "cards"} declined.`,
+        };
       }
 
       case "approve_shift": {

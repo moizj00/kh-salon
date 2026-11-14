@@ -56,6 +56,7 @@ export interface OrderCardRecord {
   skuName: string;
   qty: number;
   totalAmount: number;
+  notes?: string | null;
   status: "pending_approval" | "approved" | "rejected";
   capturedAt: string;
 }
@@ -152,6 +153,7 @@ export type ManagerApprovalAction =
   | { action: "reject_salon"; id: string }
   | { action: "approve_order_card"; id: string }
   | { action: "reject_order_card"; id: string }
+  | { action: "bulk_process_order_cards"; ids: string[]; decision: "approve" | "reject" }
   | { action: "approve_shift"; id: string }
   | { action: "flag_shift"; id: string }
   | { action: "update_shop_order_status"; id: string; status: "pending" | "confirmed" | "dispatched" }

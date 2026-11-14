@@ -1,7 +1,8 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Bell,
   CheckCircle2,
+  Download,
   Lock,
   MoreVertical,
   Printer,
@@ -10,6 +11,7 @@ import {
   ShieldCheck,
   X,
 } from "lucide-react";
+import { downloadDeliveryReceiptPdf } from "../lib/receipt-pdf";
 import { when } from "../lib/time";
 import type { DeliveryOrderFull, SalonWithApproval } from "../server/types";
 
@@ -156,9 +158,32 @@ export const DeliveryReceiptModal: React.FC<DeliveryReceiptModalProps> = ({
   salon,
   onClose,
 }) => {
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setPdfError(null);
+    setDownloadingPdf(false);
+  }, [order?.id]);
+
   if (!order) return null;
 
   const isDelivered = order.status === "delivered";
+
+  const handleDownloadPdf = () => {
+    if (downloadingPdf) return;
+    setDownloadingPdf(true);
+    setPdfError(null);
+    try {
+      downloadDeliveryReceiptPdf(order, salon);
+    } catch (err) {
+      setPdfError(
+        err instanceof Error ? err.message : "Failed to generate PDF receipt.",
+      );
+    } finally {
+      setDownloadingPdf(false);
+    }
+  };
 
   return (
     <div
@@ -273,25 +298,55 @@ export const DeliveryReceiptModal: React.FC<DeliveryReceiptModalProps> = ({
               </tfoot>
             </table>
           </div>
+
+          {order.notes && (
+            <div className="p-3 rounded-2xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] space-y-1">
+              <div className="text-[11px] font-semibold text-[#6b625e] dark:text-[#a59b96]">
+                Delivery Instructions &amp; Notes
+              </div>
+              <p className="text-xs text-[#1d1a19] dark:text-[#f2eeec] whitespace-pre-wrap">
+                {order.notes}
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Footer */}
-        <div className="no-print p-4 border-t border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5]/60 dark:bg-[#171413]/60 flex items-center justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="min-h-[40px] px-4 py-2 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold hover:bg-black/5 dark:hover:bg-white/5"
-          >
-            Close
-          </button>
-          <button
-            type="button"
-            onClick={() => window.print()}
-            className="min-h-[40px] px-4 py-2 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold flex items-center gap-1.5 hover:opacity-95"
-          >
-            <Printer className="w-3.5 h-3.5" />
-            <span>Print Receipt</span>
-          </button>
+        <div className="no-print p-4 border-t border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5]/60 dark:bg-[#171413]/60 space-y-2">
+          {pdfError && (
+            <div
+              role="alert"
+              className="text-xs text-rose-700 dark:text-rose-300 font-medium text-right"
+            >
+              {pdfError}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="min-h-[40px] px-3.5 py-2 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold hover:bg-black/5 dark:hover:bg-white/5 whitespace-nowrap shrink-0"
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadPdf}
+              disabled={downloadingPdf}
+              className="min-h-[40px] px-3.5 py-2 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-white dark:bg-[#211d1b] text-[#1d1a19] dark:text-[#f2eeec] text-xs font-semibold flex items-center gap-1.5 hover:border-[#7a2e4a] disabled:opacity-50 whitespace-nowrap shrink-0 transition-colors"
+            >
+              <Download className="w-3.5 h-3.5 text-[#7a2e4a] dark:text-[#d77a9c]" />
+              <span>{downloadingPdf ? "Generating PDF..." : "Download PDF"}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="min-h-[40px] px-3.5 py-2 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold flex items-center gap-1.5 hover:opacity-95 whitespace-nowrap shrink-0"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>Print Receipt</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

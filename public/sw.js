@@ -1,8 +1,11 @@
-// Kiran DMS Rep App Service Worker (P1-09 Task 6)
-// Cache static assets cache-first, navigation network-first with fallback.
+// Kiran DMS Rep App Service Worker
+// Cache static assets cache-first, navigation network-first with fallback,
+// and runtime-cache OpenStreetMap tiles for offline route tracking.
 // Never cache /office, /salon, auth or RPC endpoints.
 
-const CACHE_NAME = "kiran-dms-pwa-v1";
+const CACHE_NAME = "kiran-dms-pwa-v2";
+const MAP_TILE_CACHE = "kiran-map-tiles-v1";
+const MAX_MAP_TILES = 300;
 const PRECACHE_URLS = [
   "/",
   "/index.html",
@@ -21,17 +24,90 @@ self.addEventListener("install", (event) => {
 });
 
 self.addEventListener("activate", (event) => {
+  const keepCaches = new Set([CACHE_NAME, MAP_TILE_CACHE]);
   event.waitUntil(
     caches.keys().then((keys) => {
       return Promise.all(
-        keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))
+        keys.filter((key) => !keepCaches.has(key)).map((key) => caches.delete(key))
       );
     }).then(() => self.clients.claim())
   );
 });
 
+async function enforceTileCacheLimit(cache) {
+  try {
+    const keys = await cache.keys();
+    if (keys.length > MAX_MAP_TILES) {
+      const overflow = keys.length - MAX_MAP_TILES;
+      await Promise.all(keys.slice(0, overflow).map((req) => cache.delete(req)));
+    }
+  } catch {
+    // Ignore eviction errors
+  }
+}
+
+self.addEventListener("message", (event) => {
+  const payload = event.data;
+  if (!payload || payload.type !== "PREFETCH_MAP_TILES" || !Array.isArray(payload.urls)) {
+    return;
+  }
+
+  event.waitUntil(
+    caches.open(MAP_TILE_CACHE).then(async (cache) => {
+      await Promise.all(
+        payload.urls.map(async (tileUrl) => {
+          if (typeof tileUrl !== "string") return;
+          try {
+            const existing = await cache.match(tileUrl);
+            if (existing) return;
+            const res = await fetch(tileUrl, { mode: "cors", credentials: "omit" });
+            if (res.ok) {
+              await cache.put(tileUrl, res);
+            }
+          } catch {
+            // Ignore transient network failures during background prefetch
+          }
+        })
+      );
+      await enforceTileCacheLimit(cache);
+    })
+  );
+});
+
+function isMapTileRequest(url) {
+  return (
+    url.hostname === "tile.openstreetmap.org" ||
+    url.hostname.endsWith(".tile.openstreetmap.org")
+  );
+}
+
 self.addEventListener("fetch", (event) => {
+  if (event.request.method !== "GET") {
+    return;
+  }
+
   const url = new URL(event.request.url);
+
+  // Map tile requests: CacheFirst so previously loaded routes work completely offline
+  if (isMapTileRequest(url)) {
+    event.respondWith(
+      caches.open(MAP_TILE_CACHE).then(async (cache) => {
+        const cached = await cache.match(event.request);
+        if (cached) return cached;
+        try {
+          const response = await fetch(event.request);
+          if (response.ok) {
+            await cache.put(event.request, response.clone());
+            await enforceTileCacheLimit(cache);
+          }
+          return response;
+        } catch {
+          return new Response("", { status: 504, statusText: "Offline tile miss" });
+        }
+      })
+    );
+    return;
+  }
 
   // Security rule: Never cache office, salon portal, API routes, rpc calls, or auth mutations
   if (
@@ -39,8 +115,7 @@ self.addEventListener("fetch", (event) => {
     url.pathname.startsWith("/office") ||
     url.pathname.startsWith("/salon") ||
     url.pathname.includes("/rpc") ||
-    url.pathname.includes("/auth") ||
-    event.request.method !== "GET"
+    url.pathname.includes("/auth")
   ) {
     return;
   }

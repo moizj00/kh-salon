@@ -45,6 +45,7 @@ export type DeliveryOrder = {
   total_amount: number;
   status: "pending_delivery" | "delivered";
   delivered_at: string | null;
+  notes?: string | null;
 };
 
 export const INITIAL_SALONS: Salon[] = [

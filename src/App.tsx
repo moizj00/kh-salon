@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   INITIAL_ORDERS,
   INITIAL_ROUTE,
@@ -34,7 +34,18 @@ import {
 } from "./lib/outbox";
 import type { OutboxItem, SyncAttempt } from "./lib/outbox/types";
 import { cachedRows } from "./lib/cache";
+import { KARACHI_DEFAULT_CENTER } from "./lib/karachi-geo";
 import { registerServiceWorker } from "./lib/register-sw";
+import { filterOrderSkus } from "./lib/order-sku-search";
+import { checkOrderIntakeStock, DEFAULT_LOW_STOCK_THRESHOLD } from "./lib/order-stock";
+import {
+  applyStoredRouteOrder,
+  loadPreferredRouteOrder,
+  optimizeRouteStops,
+  savePreferredRouteOrder,
+  type RouteOptimizationResult,
+} from "./lib/route-optimizer";
+import { SALON_SORT_OPTIONS, sortSalons, type SalonSortKey } from "./lib/salon-sort";
 import { when } from "./lib/time";
 import { AuthGate } from "./components/auth-gate";
 import {
@@ -62,6 +73,7 @@ import type {
 import {
   AlertTriangle,
   ArrowLeft,
+  ArrowUpDown,
   Briefcase,
   CalendarCheck,
   Check,
@@ -71,6 +83,7 @@ import {
   FileText,
   History,
   List,
+  LocateFixed,
   LogOut,
   MapPin,
   Package,
@@ -103,7 +116,11 @@ export default function App() {
   const [historyItems, setHistoryItems] = useState<SyncAttempt[]>([]);
   const [outboxState, setOutboxState] = useState(syncState());
   const [salons, setSalons] = useState<SalonWithApproval[]>(INITIAL_SALONS);
-  const [route, setRoute] = useState<RouteStop[]>(INITIAL_ROUTE);
+  const [route, setRoute] = useState<RouteStop[]>(() =>
+    applyStoredRouteOrder(INITIAL_ROUTE, loadPreferredRouteOrder()),
+  );
+  const [routeOptimization, setRouteOptimization] = useState<RouteOptimizationResult | null>(null);
+  const [optimizingRoute, setOptimizingRoute] = useState(false);
   const [orders, setOrders] = useState<DeliveryOrderFull[]>(INITIAL_ORDERS);
   const [skus, setSkus] = useState<SKU[]>(INITIAL_SKUS);
   const [monthlyStats, setMonthlyStats] = useState<RepMonthlyStats>(DEFAULT_STATS);
@@ -120,6 +137,7 @@ export default function App() {
   const [loadingActivity, setLoadingActivity] = useState(false);
   const [salonSearch, setSalonSearch] = useState("");
   const [salonFilter, setSalonFilter] = useState<"all" | "regular" | "vip" | "trial" | "prospect">("all");
+  const [salonSort, setSalonSort] = useState<SalonSortKey>("name_asc");
 
   // Sub-dialogs
   const [showVisitModal, setShowVisitModal] = useState(false);
@@ -128,7 +146,9 @@ export default function App() {
   const [paymentAmount, setPaymentAmount] = useState("");
   const [showCardModal, setShowCardModal] = useState(false);
   const [selectedSkuId, setSelectedSkuId] = useState(INITIAL_SKUS[0]?.id || "");
+  const [skuSearchQuery, setSkuSearchQuery] = useState("");
   const [cardQty, setCardQty] = useState(2);
+  const [cardNotes, setCardNotes] = useState("");
   const [showNewSalonModal, setShowNewSalonModal] = useState(false);
   const [newSalonName, setNewSalonName] = useState("");
   const [newSalonArea, setNewSalonArea] = useState("Clifton, Karachi");
@@ -173,7 +193,7 @@ export default function App() {
     try {
       const res = await cachedRows("bootstrap_salons", async () => {
         const boot = await fetchBootstrap();
-        setRoute(boot.route);
+        setRoute(applyStoredRouteOrder(boot.route, loadPreferredRouteOrder()));
         setSkus(boot.skus);
         setOrders(boot.orders);
         setDayOpen(Boolean(boot.activeShift));
@@ -282,6 +302,18 @@ export default function App() {
       setSalonActivity(null);
     }
   }, [selectedSalonId, user, loadSalonActivity]);
+
+  const filteredCardSkus = useMemo(
+    () => filterOrderSkus(skus, skuSearchQuery),
+    [skus, skuSearchQuery],
+  );
+
+  useEffect(() => {
+    if (!showCardModal || filteredCardSkus.length === 0) return;
+    if (!filteredCardSkus.some((k) => k.id === selectedSkuId)) {
+      setSelectedSkuId(filteredCardSkus[0]!.id);
+    }
+  }, [showCardModal, filteredCardSkus, selectedSkuId]);
 
   const handleAuthenticated = (authedUser: UserProfile) => {
     setUser(authedUser);
@@ -477,13 +509,87 @@ export default function App() {
     }
   };
 
+  const handleSuggestOptimizedRoute = () => {
+    const pendingCount = route.filter((s) => s.status === "pending").length;
+    if (pendingCount === 0) {
+      showToast("All scheduled stops are already visited.", "info");
+      return;
+    }
+
+    setOptimizingRoute(true);
+    const runWithOrigin = (
+      origin: { lat: number; lng: number },
+      originSource: "gps" | "depot_fallback",
+      originLabel: string,
+    ) => {
+      const proposal = optimizeRouteStops({
+        route,
+        salons,
+        origin,
+        originSource,
+        originLabel,
+      });
+      setRouteOptimization(proposal);
+      setOptimizingRoute(false);
+      if (!proposal.hasChanges) {
+        showToast("Current stop order is already the shortest path.", "info");
+      }
+    };
+
+    if (typeof navigator !== "undefined" && "geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = Number(pos.coords.latitude.toFixed(5));
+          const lng = Number(pos.coords.longitude.toFixed(5));
+          runWithOrigin(
+            { lat, lng },
+            "gps",
+            `Current GPS (${lat.toFixed(3)}, ${lng.toFixed(3)})`,
+          );
+        },
+        () => {
+          runWithOrigin(
+            KARACHI_DEFAULT_CENTER,
+            "depot_fallback",
+            "Karachi Central Hub (GPS unavailable)",
+          );
+        },
+        { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 },
+      );
+    } else {
+      runWithOrigin(
+        KARACHI_DEFAULT_CENTER,
+        "depot_fallback",
+        "Karachi Central Hub (GPS unavailable)",
+      );
+    }
+  };
+
+  const handleApplyOptimizedRoute = () => {
+    if (!routeOptimization) return;
+    setRoute(routeOptimization.optimizedRoute);
+    savePreferredRouteOrder(routeOptimization.optimizedRoute);
+    const saved = routeOptimization.savedKm;
+    const count = routeOptimization.pendingLegs.length;
+    setRouteOptimization(null);
+    showToast(
+      saved > 0
+        ? `Route updated · Saves ${saved.toFixed(1)} km across ${count} pending stops.`
+        : `Optimized sequence applied across ${count} pending stops.`,
+      "ok",
+    );
+  };
+
   // 5. Create Order Intake Card
   const handleCreateCard = async () => {
     if (!currentSalon) return;
     const sku = skus.find((k) => k.id === selectedSkuId);
     if (!sku) return;
 
+    const trimmedNotes = cardNotes.trim();
     setShowCardModal(false);
+    setCardNotes("");
+    setSkuSearchQuery("");
     const id = `crd-${Date.now()}`;
     const res = await submit({
       id,
@@ -494,6 +600,7 @@ export default function App() {
         p_sku_id: sku.id,
         p_qty: cardQty,
         p_total: sku.price * cardQty,
+        p_notes: trimmedNotes || null,
         p_at_client: new Date().toISOString(),
       },
       label: `Order Card: ${cardQty}x ${sku.name} for ${currentSalon.name}`,
@@ -699,6 +806,7 @@ export default function App() {
     const matchesFilter = salonFilter === "all" || s.stage === salonFilter;
     return matchesSearch && matchesFilter;
   });
+  const sortedSalons = sortSalons(filteredSalons, salonSort);
 
   return (
     <div
@@ -923,21 +1031,114 @@ export default function App() {
             {/* ================= TAB 2: ROUTE ================= */}
             {activeTab === "route" && (
               <div className="space-y-4">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <h2 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
                       Today's Scheduled Route
                     </h2>
                     <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                      Karachi Central & South · {route.length} stops · Week 2 Cycle
+                      Karachi Central &amp; South · {route.length} stops · Week 2 Cycle
                     </p>
                   </div>
+
+                  <button
+                    type="button"
+                    data-testid="optimize-route-btn"
+                    onClick={handleSuggestOptimizedRoute}
+                    disabled={optimizingRoute}
+                    className="px-3.5 py-2 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 hover:opacity-95 disabled:opacity-60"
+                  >
+                    <LocateFixed className={`w-3.5 h-3.5 ${optimizingRoute ? "animate-pulse" : ""}`} />
+                    <span>{optimizingRoute ? "Locating..." : "Optimize Route (GPS)"}</span>
+                  </button>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {routeOptimization && (
+                  <div
+                    role="region"
+                    aria-label="Suggested shortest-path route"
+                    data-testid="route-optimization-suggestion"
+                    className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#7a2e4a]/40 dark:border-[#d77a9c]/40 shadow-xs space-y-3"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div className="space-y-0.5">
+                        <div className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec] flex items-center gap-1.5">
+                          <LocateFixed className="w-4 h-4 text-[#7a2e4a] dark:text-[#d77a9c] shrink-0" />
+                          <span>
+                            {routeOptimization.hasChanges
+                              ? "Suggested Shortest-Path Sequence"
+                              : "Current Route Is Already Optimal"}
+                          </span>
+                        </div>
+                        <p className="text-xs text-[#6b625e] dark:text-[#a59b96] tabular-nums">
+                          From {routeOptimization.originLabel} ·{" "}
+                          {routeOptimization.hasChanges ? (
+                            <>
+                              Current {routeOptimization.originalPendingDistanceKm.toFixed(1)} km{" "}
+                              <span aria-hidden="true">→</span>{" "}
+                              <strong className="text-emerald-700 dark:text-emerald-400">
+                                {routeOptimization.optimizedPendingDistanceKm.toFixed(1)} km
+                              </strong>
+                              {routeOptimization.savedKm > 0 && (
+                                <> · Saves {routeOptimization.savedKm.toFixed(1)} km ({routeOptimization.savedPct}%)</>
+                              )}
+                            </>
+                          ) : (
+                            <>Total pending distance: {routeOptimization.optimizedPendingDistanceKm.toFixed(1)} km</>
+                          )}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setRouteOptimization(null)}
+                          className="px-3 py-1.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold text-[#6b625e] dark:text-[#a59b96] hover:text-[#1d1a19] whitespace-nowrap shrink-0"
+                        >
+                          Dismiss
+                        </button>
+                        {routeOptimization.hasChanges && (
+                          <button
+                            type="button"
+                            data-testid="apply-optimized-route-btn"
+                            onClick={handleApplyOptimizedRoute}
+                            className="px-3.5 py-1.5 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Apply Optimized Order</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <ol className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                      {routeOptimization.pendingLegs.map((leg, idx) => (
+                        <li
+                          key={leg.stop.id}
+                          className="p-2.5 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] flex items-start gap-2"
+                        >
+                          <span className="w-5 h-5 rounded-full bg-[#7a2e4a] text-white font-bold text-[11px] flex items-center justify-center shrink-0 tabular-nums mt-0.5">
+                            {idx + 1}
+                          </span>
+                          <div className="min-w-0">
+                            <div className="font-semibold text-[#1d1a19] dark:text-[#f2eeec] truncate">
+                              {leg.stop.salon_name}
+                            </div>
+                            <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96] tabular-nums">
+                              +{leg.legDistanceKm.toFixed(1)} km · Total {leg.cumulativeDistanceKm.toFixed(1)} km
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3" data-testid="todays-route-stops-list">
                   {route.map((stop) => (
                     <div
                       key={stop.id}
+                      data-route-stop-id={stop.id}
                       className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs flex items-center justify-between gap-3"
                     >
                       <div className="flex items-start gap-3">
@@ -1109,7 +1310,10 @@ export default function App() {
 
                           <button
                             type="button"
-                            onClick={() => setShowCardModal(true)}
+                            onClick={() => {
+                              setSkuSearchQuery("");
+                              setShowCardModal(true);
+                            }}
                             className="p-3 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-center hover:border-[#7a2e4a] flex flex-col items-center justify-center gap-1.5"
                           >
                             <FileText className="w-5 h-5 text-indigo-600" />
@@ -1154,16 +1358,21 @@ export default function App() {
                               </div>
                             ))}
                             {salonActivity.orderCards.map((c) => (
-                              <div key={c.id} className="py-2 flex items-center justify-between gap-2">
-                                <div>
+                              <div key={c.id} className="py-2 flex items-start justify-between gap-2">
+                                <div className="min-w-0">
                                   <div className="font-semibold">
                                     Order Card: {c.qty}x {c.skuName}
                                   </div>
+                                  {c.notes && (
+                                    <div className="text-[11px] text-[#7a2e4a] dark:text-[#d77a9c] mt-0.5">
+                                      Note: {c.notes}
+                                    </div>
+                                  )}
                                   <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
                                     {when(c.capturedAt)} · {c.status.replace("_", " ")}
                                   </div>
                                 </div>
-                                <span className="font-bold tabular-nums">
+                                <span className="font-bold tabular-nums shrink-0">
                                   PKR {c.totalAmount.toLocaleString()}
                                 </span>
                               </div>
@@ -1245,6 +1454,12 @@ export default function App() {
                                         {order.items.map((it) => `${it.qty}x ${it.sku_name}`).join(" · ")}
                                       </div>
 
+                                      {order.notes && (
+                                        <div className="text-[11px] text-[#7a2e4a] dark:text-[#d77a9c] truncate">
+                                          Note: {order.notes}
+                                        </div>
+                                      )}
+
                                       {timestamp && (
                                         <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
                                           {order.status === "delivered" ? "Delivered" : "Confirmed"} {when(timestamp)}
@@ -1309,30 +1524,48 @@ export default function App() {
                           placeholder="Search salon name or area..."
                           value={salonSearch}
                           onChange={(e) => setSalonSearch(e.target.value)}
-                          className="w-full pl-9 pr-3 py-2 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-white dark:bg-[#211d1b]"
+                          className="w-full min-h-[40px] pl-9 pr-3 py-2 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-white dark:bg-[#211d1b]"
                         />
                       </div>
 
-                      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 text-xs">
-                        {(["all", "vip", "regular", "trial", "prospect"] as const).map((st) => (
-                          <button
-                            key={st}
-                            type="button"
-                            onClick={() => setSalonFilter(st)}
-                            className={`px-3 py-1.5 rounded-lg capitalize whitespace-nowrap transition-colors ${
-                              salonFilter === st
-                                ? "bg-[#7a2e4a] text-white font-semibold"
-                                : "bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-[#6b625e] dark:text-[#a59b96]"
-                            }`}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="relative shrink-0">
+                          <ArrowUpDown className="w-3.5 h-3.5 absolute left-3 top-3 text-[#6b625e] pointer-events-none" />
+                          <select
+                            aria-label="Sort salons by"
+                            value={salonSort}
+                            onChange={(e) => setSalonSort(e.target.value as SalonSortKey)}
+                            className="min-h-[40px] pl-8 pr-3 py-2 text-xs font-medium rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-white dark:bg-[#211d1b] text-[#1d1a19] dark:text-[#f2eeec]"
                           >
-                            {st}
-                          </button>
-                        ))}
+                            {SALON_SORT_OPTIONS.map((opt) => (
+                              <option key={opt.value} value={opt.value}>
+                                Sort: {opt.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 text-xs">
+                          {(["all", "vip", "regular", "trial", "prospect"] as const).map((st) => (
+                            <button
+                              key={st}
+                              type="button"
+                              onClick={() => setSalonFilter(st)}
+                              className={`min-h-[38px] px-3 py-1.5 rounded-lg capitalize whitespace-nowrap transition-colors ${
+                                salonFilter === st
+                                  ? "bg-[#7a2e4a] text-white font-semibold"
+                                  : "bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-[#6b625e] dark:text-[#a59b96]"
+                              }`}
+                            >
+                              {st}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                      {filteredSalons.map((salon) => (
+                      {sortedSalons.map((salon) => (
                         <button
                           key={salon.id}
                           type="button"
@@ -1340,12 +1573,12 @@ export default function App() {
                           className="w-full text-left p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs hover:border-[#7a2e4a] transition-colors"
                         >
                           <div className="flex items-start justify-between gap-2">
-                            <div>
+                            <div className="min-w-0">
                               <h4 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
                                 {salon.name}
                               </h4>
                               <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                                {salon.area}
+                                {salon.area} · {salon.last_visited_at ? `Visited ${when(salon.last_visited_at)}` : "Never visited"}
                               </p>
                             </div>
                             <span className="text-[11px] font-bold uppercase text-[#7a2e4a] dark:text-[#d77a9c] shrink-0">
@@ -1386,6 +1619,7 @@ export default function App() {
                     k.name.toLowerCase().includes(prodName.split(" ")[0].toLowerCase()),
                   );
                   if (matchedSku) setSelectedSkuId(matchedSku.id);
+                  setSkuSearchQuery("");
                   setShowCardModal(true);
                 }}
                 showToast={showToast}
@@ -1471,35 +1705,33 @@ export default function App() {
 
                         {!signingOrderId && (
                           <div className="flex flex-wrap items-center gap-2">
-                            {deliveryViewMode === "list" && (
-                              <div
-                                role="group"
-                                aria-label="Filter delivery orders by status"
-                                className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#f1eae6] dark:bg-[#2a2523] border border-[#e6dfdb] dark:border-[#3a3330]"
-                              >
-                                {(
-                                  [
-                                    { id: "all", label: `All (${allCount})` },
-                                    { id: "pending_delivery", label: `Pending (${pendingCount})` },
-                                    { id: "delivered", label: `Delivered (${deliveredCount})` },
-                                  ] as const
-                                ).map((opt) => (
-                                  <button
-                                    key={opt.id}
-                                    type="button"
-                                    aria-pressed={deliveryFilter === opt.id}
-                                    onClick={() => setDeliveryFilter(opt.id)}
-                                    className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition-colors tabular-nums ${
-                                      deliveryFilter === opt.id
-                                        ? "bg-white dark:bg-[#171413] text-[#7a2e4a] dark:text-[#d77a9c] shadow-xs"
-                                        : "text-[#6b625e] dark:text-[#a59b96] hover:text-[#1d1a19] dark:hover:text-[#f2eeec]"
-                                    }`}
-                                  >
-                                    {opt.label}
-                                  </button>
-                                ))}
-                              </div>
-                            )}
+                            <div
+                              role="group"
+                              aria-label="Filter delivery orders by status"
+                              className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#f1eae6] dark:bg-[#2a2523] border border-[#e6dfdb] dark:border-[#3a3330]"
+                            >
+                              {(
+                                [
+                                  { id: "all", label: `All (${allCount})` },
+                                  { id: "pending_delivery", label: `Pending (${pendingCount})` },
+                                  { id: "delivered", label: `Delivered (${deliveredCount})` },
+                                ] as const
+                              ).map((opt) => (
+                                <button
+                                  key={opt.id}
+                                  type="button"
+                                  aria-pressed={deliveryFilter === opt.id}
+                                  onClick={() => setDeliveryFilter(opt.id)}
+                                  className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition-colors tabular-nums ${
+                                    deliveryFilter === opt.id
+                                      ? "bg-white dark:bg-[#171413] text-[#7a2e4a] dark:text-[#d77a9c] shadow-xs"
+                                      : "text-[#6b625e] dark:text-[#a59b96] hover:text-[#1d1a19] dark:hover:text-[#f2eeec]"
+                                  }`}
+                                >
+                                  {opt.label}
+                                </button>
+                              ))}
+                            </div>
 
                             <button
                               type="button"
@@ -1521,7 +1753,7 @@ export default function App() {
                               ) : (
                                 <>
                                   <MapPin className="w-3.5 h-3.5 text-[#7a2e4a] dark:text-[#d77a9c]" />
-                                  <span className="tabular-nums">Map View ({pendingCount})</span>
+                                  <span className="tabular-nums">Map View ({filteredOrders.length})</span>
                                 </>
                               )}
                             </button>
@@ -1603,7 +1835,7 @@ export default function App() {
                         </div>
                       ) : deliveryViewMode === "map" ? (
                         <DeliveryMapView
-                          orders={searchedOrders}
+                          orders={filteredOrders}
                           salons={salons}
                           onSelectDeliver={(orderId) => {
                             setDeliveryViewMode("list");
@@ -1731,6 +1963,14 @@ export default function App() {
                                       PKR {order.total_amount.toLocaleString()}
                                     </span>
                                   </div>
+                                  {order.notes && (
+                                    <div className="pt-1.5 border-t border-[#e6dfdb]/60 dark:border-[#3a3330] text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                                      <span className="font-semibold text-[#1d1a19] dark:text-[#f2eeec]">
+                                        Note:
+                                      </span>{" "}
+                                      {order.notes}
+                                    </div>
+                                  )}
                                 </div>
                               </div>
 
@@ -2219,64 +2459,263 @@ export default function App() {
       )}
 
       {/* 5. Order Intake Card Modal */}
-      {showCardModal && currentSalon && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#211d1b] p-5 shadow-xl border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
-            <h3 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
-              Create Order Intake Card
-            </h3>
-            <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-              For: <strong>{currentSalon.name}</strong>
-            </p>
-            <div>
-              <label htmlFor="order-sku" className="block text-xs font-semibold mb-1">
-                Select Product SKU:
-              </label>
-              <select
-                id="order-sku"
-                value={selectedSkuId}
-                onChange={(e) => setSelectedSkuId(e.target.value)}
-                className="w-full p-2.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+      {showCardModal && currentSalon && (() => {
+        const activeSelectedSkuId = filteredCardSkus.some((k) => k.id === selectedSkuId)
+          ? selectedSkuId
+          : (filteredCardSkus[0]?.id ?? "");
+        const stockCheck = activeSelectedSkuId
+          ? checkOrderIntakeStock(skus, activeSelectedSkuId, cardQty)
+          : {
+              selectedSku: null,
+              availableStock: 0,
+              exceedsStock: false,
+              shortfall: 0,
+              unitLabel: "Units",
+              lowStockThreshold: DEFAULT_LOW_STOCK_THRESHOLD,
+              isOutOfStock: false,
+              isLowStock: false,
+              isBelowThreshold: false,
+            };
+        const selectedSku = stockCheck.selectedSku;
+        const estimatedTotalPkr = selectedSku ? selectedSku.price * cardQty : 0;
+
+        return (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="order-intake-modal-title"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          >
+            <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#211d1b] p-5 shadow-xl border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
+              <h3
+                id="order-intake-modal-title"
+                className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]"
               >
-                {skus.map((k) => (
-                  <option key={k.id} value={k.id}>
-                    {k.name} (PKR {k.price.toLocaleString()})
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label htmlFor="order-qty" className="block text-xs font-semibold mb-1">
-                Quantity:
-              </label>
-              <input
-                id="order-qty"
-                type="number"
-                min={1}
-                value={cardQty}
-                onChange={(e) => setCardQty(Math.max(1, Number(e.target.value)))}
-                className="w-full p-2.5 text-sm font-bold tabular-nums rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
-              />
-            </div>
-            <div className="flex gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setShowCardModal(false)}
-                className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleCreateCard}
-                className="flex-1 py-2.5 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold"
-              >
-                Create Card
-              </button>
+                Create Order Intake Card
+              </h3>
+              <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                For: <strong>{currentSalon.name}</strong>
+              </p>
+              <div className="space-y-2">
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label htmlFor="order-sku-search" className="block text-xs font-semibold">
+                      Search Products:
+                    </label>
+                    <span
+                      data-testid="order-sku-match-count"
+                      className="text-[11px] text-[#6b625e] dark:text-[#a59b96] tabular-nums"
+                    >
+                      {filteredCardSkus.length} of {skus.length} shown
+                    </span>
+                  </div>
+                  <div className="relative">
+                    <Search
+                      className="w-3.5 h-3.5 text-[#6b625e] dark:text-[#a59b96] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
+                      aria-hidden="true"
+                    />
+                    <input
+                      id="order-sku-search"
+                      type="text"
+                      placeholder="Find by product name or category..."
+                      value={skuSearchQuery}
+                      onChange={(e) => {
+                        const nextQuery = e.target.value;
+                        setSkuSearchQuery(nextQuery);
+                        const nextMatches = filterOrderSkus(skus, nextQuery);
+                        if (
+                          nextMatches.length > 0 &&
+                          !nextMatches.some((k) => k.id === selectedSkuId)
+                        ) {
+                          setSelectedSkuId(nextMatches[0]!.id);
+                        }
+                      }}
+                      className="w-full pl-8 pr-8 py-2 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413] text-[#1d1a19] dark:text-[#f2eeec] focus:outline-none focus:ring-2 focus:ring-[#7a2e4a]/25"
+                    />
+                    {skuSearchQuery && (
+                      <button
+                        type="button"
+                        aria-label="Clear product search"
+                        onClick={() => setSkuSearchQuery("")}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-[#6b625e] hover:text-[#1d1a19] dark:text-[#a59b96] dark:hover:text-[#f2eeec]"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <label htmlFor="order-sku" className="block text-xs font-semibold mb-1">
+                    Select Product SKU:
+                  </label>
+                  <select
+                    id="order-sku"
+                    value={activeSelectedSkuId}
+                    disabled={filteredCardSkus.length === 0}
+                    onChange={(e) => setSelectedSkuId(e.target.value)}
+                    className="w-full p-2.5 pr-8 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413] focus:outline-none focus:ring-2 focus:ring-[#7a2e4a]/25 disabled:opacity-60"
+                  >
+                    {filteredCardSkus.length === 0 ? (
+                      <option value="">No matching products</option>
+                    ) : (
+                      filteredCardSkus.map((k) => {
+                        const qty = Math.max(0, Number(k.bag_qty ?? 0));
+                        const stockSuffix =
+                          qty === 0
+                            ? "Out of stock"
+                            : qty < DEFAULT_LOW_STOCK_THRESHOLD
+                              ? `${qty} in stock · Low stock`
+                              : `${qty} in stock`;
+                        return (
+                          <option key={k.id} value={k.id}>
+                            {k.name} · {k.category} ({stockSuffix} · PKR {k.price.toLocaleString()})
+                          </option>
+                        );
+                      })
+                    )}
+                  </select>
+                  {filteredCardSkus.length === 0 && (
+                    <div
+                      data-testid="order-sku-empty"
+                      className="mt-2 px-3 py-2 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413] text-xs text-[#6b625e] dark:text-[#a59b96] flex items-center justify-between gap-2"
+                    >
+                      <span>No products match "{skuSearchQuery.trim()}".</span>
+                      <button
+                        type="button"
+                        onClick={() => setSkuSearchQuery("")}
+                        className="font-semibold text-[#7a2e4a] dark:text-[#d77a9c] whitespace-nowrap shrink-0"
+                      >
+                        Clear filter
+                      </button>
+                    </div>
+                  )}
+                  {selectedSku && stockCheck.isBelowThreshold && (
+                    <div
+                      role="status"
+                      data-testid="order-low-stock-indicator"
+                      className={`mt-2 px-3 py-2 rounded-xl border text-xs flex items-start gap-2 ${
+                        stockCheck.isOutOfStock
+                          ? "border-rose-300 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/30 text-rose-800 dark:text-rose-200"
+                          : "border-amber-300 dark:border-amber-700/70 bg-amber-50/80 dark:bg-amber-950/30 text-amber-800 dark:text-amber-200"
+                      }`}
+                    >
+                      <AlertTriangle
+                        className={`w-4 h-4 shrink-0 mt-0.5 ${
+                          stockCheck.isOutOfStock
+                            ? "text-rose-700 dark:text-rose-300"
+                            : "text-amber-700 dark:text-amber-300"
+                        }`}
+                      />
+                      <div className="min-w-0 leading-snug">
+                        <span className="font-semibold">
+                          {stockCheck.isOutOfStock ? "Out of Stock" : "Low Stock"}
+                        </span>
+                        <span aria-hidden="true"> · </span>
+                        <span className="tabular-nums">
+                          {stockCheck.isOutOfStock
+                            ? `0 ${stockCheck.unitLabel} in bag (below ${stockCheck.lowStockThreshold}-unit threshold)`
+                            : `Only ${stockCheck.availableStock} ${stockCheck.unitLabel} left (below ${stockCheck.lowStockThreshold}-unit threshold)`}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label htmlFor="order-qty" className="block text-xs font-semibold">
+                    Quantity:
+                  </label>
+                  {selectedSku && (
+                    <span
+                      data-testid="order-stock-indicator"
+                      className={`text-[11px] tabular-nums ${
+                        stockCheck.isOutOfStock
+                          ? "font-semibold text-rose-700 dark:text-rose-300"
+                          : stockCheck.exceedsStock || stockCheck.isLowStock
+                            ? "font-semibold text-amber-700 dark:text-amber-300"
+                            : "text-[#6b625e] dark:text-[#a59b96]"
+                      }`}
+                    >
+                      In stock: {stockCheck.availableStock} {stockCheck.unitLabel}
+                    </span>
+                  )}
+                </div>
+                <input
+                  id="order-qty"
+                  type="number"
+                  min={1}
+                  aria-invalid={stockCheck.exceedsStock}
+                  value={cardQty}
+                  onChange={(e) => setCardQty(Math.max(1, Number(e.target.value)))}
+                  className={`w-full p-2.5 text-sm font-bold tabular-nums rounded-xl border transition-colors focus:outline-none focus:ring-2 ${
+                    stockCheck.exceedsStock
+                      ? "border-amber-500 dark:border-amber-400 bg-amber-50/70 dark:bg-amber-950/35 text-amber-700 dark:text-amber-300 focus:ring-amber-500/35"
+                      : "border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413] text-[#1d1a19] dark:text-[#f2eeec] focus:ring-[#7a2e4a]/25"
+                  }`}
+                />
+                {stockCheck.exceedsStock && (
+                  <div
+                    role="alert"
+                    data-testid="order-stock-warning"
+                    className="mt-2 p-2.5 rounded-xl border border-amber-300 dark:border-amber-700/70 bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-200 text-xs flex items-start gap-2"
+                  >
+                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-700 dark:text-amber-300" />
+                    <span>
+                      {stockCheck.availableStock === 0
+                        ? "Out of stock in bag inventory. Warehouse fulfillment will be required upon office approval."
+                        : `Requested quantity (${cardQty}) exceeds current stock (${stockCheck.availableStock} ${stockCheck.unitLabel} available — short by ${stockCheck.shortfall}).`}
+                    </span>
+                  </div>
+                )}
+              </div>
+              <div>
+                <label htmlFor="order-notes" className="block text-xs font-semibold mb-1">
+                  Delivery Instructions / Notes (Optional):
+                </label>
+                <textarea
+                  id="order-notes"
+                  rows={3}
+                  placeholder="Special delivery timing, stylist contact, or salon owner requests..."
+                  value={cardNotes}
+                  onChange={(e) => setCardNotes(e.target.value)}
+                  className="w-full p-2.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+                />
+              </div>
+              {selectedSku && (
+                <div className="flex items-center justify-between text-xs pt-1 border-t border-[#e6dfdb]/70 dark:border-[#3a3330]">
+                  <span className="text-[#6b625e] dark:text-[#a59b96]">Estimated Order Total</span>
+                  <span className="font-bold text-[#7a2e4a] dark:text-[#d77a9c] tabular-nums">
+                    PKR {estimatedTotalPkr.toLocaleString()}
+                  </span>
+                </div>
+              )}
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCardModal(false);
+                    setCardNotes("");
+                    setSkuSearchQuery("");
+                  }}
+                  className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectedSku || filteredCardSkus.length === 0}
+                  onClick={handleCreateCard}
+                  className="flex-1 py-2.5 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold disabled:opacity-50"
+                >
+                  Create Card
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* 6. New Prospect Salon Modal */}
       {showNewSalonModal && (

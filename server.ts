@@ -268,6 +268,15 @@ async function startServer() {
           res.status(400).json({ error: "Please select at least one pending delivery order." });
           return;
         }
+      } else if (action.action === "bulk_process_order_cards") {
+        if (!Array.isArray(action.ids) || action.ids.length === 0) {
+          res.status(400).json({ error: "Please select at least one pending order intake card." });
+          return;
+        }
+        if (action.decision !== "approve" && action.decision !== "reject") {
+          res.status(400).json({ error: "Bulk decision must be 'approve' or 'reject'." });
+          return;
+        }
       } else if (typeof action.id !== "string") {
         res.status(400).json({ error: "Invalid approval payload." });
         return;

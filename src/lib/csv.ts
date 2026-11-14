@@ -31,6 +31,7 @@ export function buildDeliveryOrdersCsv(
     "Created At",
     "Delivered At",
     "Verification",
+    "Delivery Notes",
   ];
 
   const rows = orders.map((ord) => {
@@ -58,6 +59,7 @@ export function buildDeliveryOrdersCsv(
       ord.created_at ?? "",
       ord.delivered_at ?? "",
       verification,
+      ord.notes ?? "",
     ]
       .map(escapeCsvCell)
       .join(",");

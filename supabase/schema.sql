@@ -103,9 +103,12 @@ create table if not exists public.order_cards (
   sku_name text not null,
   qty integer not null check (qty > 0),
   total_amount integer not null,
+  notes text,
   status text not null default 'pending_approval' check (status in ('pending_approval', 'approved', 'rejected')),
   captured_at timestamptz not null default now()
 );
+
+alter table public.order_cards add column if not exists notes text;
 
 -- 9. Delivery Orders & Digital Signatures
 create table if not exists public.delivery_orders (
@@ -115,12 +118,15 @@ create table if not exists public.delivery_orders (
   salon_name text not null,
   items jsonb not null default '[]'::jsonb,
   total_amount integer not null,
+  notes text,
   status text not null default 'pending_delivery' check (status in ('pending_delivery', 'delivered')),
   delivery_submission_id text,
   signature_data text,
   delivered_at timestamptz,
   created_at timestamptz not null default now()
 );
+
+alter table public.delivery_orders add column if not exists notes text;
 
 -- 10. Lost Demand Ledger
 create table if not exists public.lost_demand (

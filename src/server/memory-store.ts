@@ -371,6 +371,8 @@ export class MemoryKiranRepository implements KiranRepository {
         const salonId = String(args.p_salon_id ?? "");
         const skuId = String(args.p_sku_id ?? "");
         const qty = Number(args.p_qty ?? 1);
+        const rawNotes = args.p_notes ?? args.notes ?? "";
+        const notes = typeof rawNotes === "string" ? rawNotes.trim() || null : null;
         const salon = this.salons.find((s) => s.id === salonId);
         const sku = this.skus.find((k) => k.id === skuId);
         if (!salon) throw new RpcError(`Salon '${salonId}' not found.`, 404, "P0002");
@@ -388,11 +390,12 @@ export class MemoryKiranRepository implements KiranRepository {
           skuName: sku.name,
           qty,
           totalAmount: total,
+          notes,
           status: "pending_approval",
           capturedAt: at,
         });
         salon.open_cards_count += 1;
-        result = { id, salon_id: salonId, sku_id: skuId, qty, total_amount: total };
+        result = { id, salon_id: salonId, sku_id: skuId, qty, total_amount: total, notes };
         break;
       }
 
@@ -587,6 +590,7 @@ export class MemoryKiranRepository implements KiranRepository {
           total_amount: card.totalAmount,
           status: "pending_delivery",
           delivered_at: null,
+          notes: card.notes ?? null,
           signature_data: null,
           created_at: new Date().toISOString(),
         });
@@ -602,6 +606,73 @@ export class MemoryKiranRepository implements KiranRepository {
           salon.open_cards_count = Math.max(0, salon.open_cards_count - 1);
         }
         return { ok: true, message: "Order intake card declined." };
+      }
+
+      case "bulk_process_order_cards": {
+        const uniqueIds = Array.from(new Set(input.ids.filter((id) => typeof id === "string" && id.trim())));
+        if (uniqueIds.length === 0) {
+          throw new RpcError("Please select at least one order intake card.", 400, "22023");
+        }
+        const idSet = new Set(uniqueIds);
+        const matchingCards = this.orderCards.filter((c) => idSet.has(c.id));
+        if (matchingCards.length === 0) {
+          throw new RpcError("Selected order intake cards were not found.", 404, "P0002");
+        }
+        const pendingCards = matchingCards.filter((c) => c.status === "pending_approval");
+        if (pendingCards.length === 0) {
+          return { ok: true, message: "Selected order intake cards are already processed." };
+        }
+
+        const nowMs = Date.now();
+        const nowIso = new Date(nowMs).toISOString();
+        let processedCount = 0;
+
+        for (let idx = 0; idx < pendingCards.length; idx++) {
+          const card = pendingCards[idx];
+          const salon = this.salons.find((s) => s.id === card.salonId);
+
+          if (input.decision === "approve") {
+            card.status = "approved";
+            if (salon) {
+              salon.open_cards_count = Math.max(0, salon.open_cards_count - 1);
+            }
+            const sku = this.skus.find((k) => k.id === card.skuId);
+            const orderNumber = `ORD-KRN-2026-${8800 + this.orders.length + 1}`;
+            this.orders.unshift({
+              id: `ord-${nowMs}-${idx + 1}`,
+              order_number: orderNumber,
+              salon_id: card.salonId,
+              salon_name: card.salonName ?? salon?.name ?? "Salon",
+              items: [
+                {
+                  sku_name: card.skuName,
+                  qty: card.qty,
+                  price: sku?.price ?? Math.round(card.totalAmount / Math.max(1, card.qty)),
+                },
+              ],
+              total_amount: card.totalAmount,
+              status: "pending_delivery",
+              delivered_at: null,
+              notes: card.notes ?? null,
+              signature_data: null,
+              created_at: nowIso,
+            });
+          } else {
+            card.status = "rejected";
+            if (salon) {
+              salon.open_cards_count = Math.max(0, salon.open_cards_count - 1);
+            }
+          }
+          processedCount += 1;
+        }
+
+        return {
+          ok: true,
+          message:
+            input.decision === "approve"
+              ? `${processedCount} order intake ${processedCount === 1 ? "card" : "cards"} approved and converted to delivery.`
+              : `${processedCount} order intake ${processedCount === 1 ? "card" : "cards"} declined.`,
+        };
       }
 
       case "approve_shift": {

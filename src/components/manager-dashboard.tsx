@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from "react";
 import {
   AlertTriangle,
+  ArrowUpDown,
   Check,
   ClipboardCheck,
   Coins,
   Download,
   FileSpreadsheet,
+  Layers,
   Package,
   RefreshCw,
   Search,
@@ -15,11 +17,18 @@ import {
 } from "lucide-react";
 import { fetchManagerOverview, resendDeliveryNotification, submitManagerApproval } from "../lib/api";
 import { downloadDeliveryOrdersCsv } from "../lib/csv";
+import { computeManagerQuickSnapshot } from "../lib/manager-snapshot";
+import {
+  summarizeSelectedOrderCards,
+  type OrderCardBulkDecision,
+} from "../lib/order-card-bulk";
+import { SALON_SORT_OPTIONS, sortSalons, type SalonSortKey } from "../lib/salon-sort";
 import { when } from "../lib/time";
 import type {
   DeliveryOrderFull,
   ManagerApprovalAction,
   ManagerOverviewPayload,
+  OrderCardRecord,
   UserRole,
 } from "../server/types";
 import {
@@ -30,6 +39,7 @@ import {
   DeliveryReceiptModal,
 } from "./delivery-actions";
 import { DeliveryTrendsChart } from "./delivery-trends-chart";
+import { ConfirmBulkOrderCardsModal, OrderCardBulkBar } from "./order-card-bulk";
 import { SalonBulkImportModal } from "./salon-bulk-import-modal";
 
 interface ManagerDashboardProps {
@@ -51,6 +61,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [salonQuery, setSalonQuery] = useState("");
+  const [salonSort, setSalonSort] = useState<SalonSortKey>("name_asc");
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [deliverySearch, setDeliverySearch] = useState("");
   const [deliveryFilter, setDeliveryFilter] = useState<"all" | "pending_delivery" | "delivered">("all");
@@ -62,6 +73,13 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   const [confirmDeliverOrder, setConfirmDeliverOrder] = useState<DeliveryOrderFull | null>(null);
   const [markingDelivered, setMarkingDelivered] = useState(false);
   const [notifyingOrderId, setNotifyingOrderId] = useState<string | null>(null);
+  const [cardBulkMode, setCardBulkMode] = useState(false);
+  const [selectedOrderCardIds, setSelectedOrderCardIds] = useState<string[]>([]);
+  const [bulkCardConfirm, setBulkCardConfirm] = useState<{
+    cards: OrderCardRecord[];
+    decision: OrderCardBulkDecision;
+  } | null>(null);
+  const [processingBulkCards, setProcessingBulkCards] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -150,6 +168,36 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
     }
   };
 
+  const handleConfirmBulkOrderCards = async (
+    targetCards: OrderCardRecord[],
+    decision: OrderCardBulkDecision,
+  ) => {
+    const ids = targetCards.map((c) => c.id);
+    if (ids.length === 0) return;
+    setProcessingBulkCards(true);
+    try {
+      const res = await submitManagerApproval({
+        action: "bulk_process_order_cards",
+        ids,
+        decision,
+      });
+      const idSet = new Set(ids);
+      setSelectedOrderCardIds((prev) => prev.filter((id) => !idSet.has(id)));
+      setBulkCardConfirm(null);
+      setCardBulkMode(false);
+      showToast(res.message, "ok");
+      await load();
+      onApprovedChange?.();
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : "Failed to process selected order intake cards.",
+        "warn",
+      );
+    } finally {
+      setProcessingBulkCards(false);
+    }
+  };
+
   if (loading && !data) {
     return (
       <div className="space-y-4">
@@ -187,11 +235,13 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   const pendingApprovalCount =
     data.pendingSalons.length + data.pendingOrderCards.length + flaggedShifts.length;
   const totalLostDemand = data.lostDemand.reduce((acc, d) => acc + d.qty, 0);
+  const snapshot = computeManagerQuickSnapshot(data.salons, data.deliveryOrders);
   const filteredSalons = data.salons.filter(
     (s) =>
       s.name.toLowerCase().includes(salonQuery.toLowerCase()) ||
       s.area.toLowerCase().includes(salonQuery.toLowerCase()),
   );
+  const sortedSalons = sortSalons(filteredSalons, salonSort);
 
   // Aggregate lost demand by SKU name
   const demandSummary = Object.entries(
@@ -218,7 +268,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
           <button
             type="button"
             onClick={() => setShowBulkImport(true)}
-            className="px-3.5 py-2 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs hover:bg-[#66243d]"
+            className="px-3.5 py-2 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs hover:bg-[#66243d] whitespace-nowrap shrink-0"
           >
             <FileSpreadsheet className="w-3.5 h-3.5" />
             <span>Import Salons (Excel)</span>
@@ -227,13 +277,83 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
           <button
             type="button"
             onClick={() => void load()}
-            className="px-3.5 py-2 rounded-xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold flex items-center gap-1.5 hover:border-[#7a2e4a]"
+            className="px-3.5 py-2 rounded-xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold flex items-center gap-1.5 hover:border-[#7a2e4a] whitespace-nowrap shrink-0"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
             <span>Refresh Ledger</span>
           </button>
         </div>
       </div>
+
+      {/* Quick Snapshot */}
+      <section
+        aria-label="Quick Snapshot"
+        className="rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] overflow-hidden"
+      >
+        <div className="px-4 py-2.5 border-b border-[#e6dfdb] dark:border-[#3a3330] flex flex-wrap items-center justify-between gap-2">
+          <h3 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
+            Quick Snapshot
+          </h3>
+          <div className="text-xs text-[#6b625e] dark:text-[#a59b96] tabular-nums">
+            <span>{snapshot.totalSalonsCount} salons</span>
+            <span aria-hidden="true"> · </span>
+            <span>
+              {snapshot.totalPendingDeliveries + snapshot.totalDeliveredCount} delivery orders
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-[#e6dfdb] dark:divide-[#3a3330]">
+          <div className="p-4 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-xs font-medium text-[#6b625e] dark:text-[#a59b96]">
+                Total Pending Deliveries
+              </div>
+              <div
+                data-testid="snapshot-pending-deliveries"
+                className="text-2xl font-bold tabular-nums mt-1 text-amber-700 dark:text-amber-300"
+              >
+                {snapshot.totalPendingDeliveries}
+              </div>
+              <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96] mt-0.5 tabular-nums">
+                PKR {snapshot.pendingDeliveriesValuePkr.toLocaleString()} awaiting dispatch ·{" "}
+                {snapshot.totalDeliveredCount} delivered
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSection("orders")}
+              className="min-h-[36px] px-3 py-1.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold text-[#7a2e4a] dark:text-[#d77a9c] hover:border-[#7a2e4a] whitespace-nowrap shrink-0 transition-colors"
+            >
+              View Ledger
+            </button>
+          </div>
+
+          <div className="p-4 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-xs font-medium text-[#6b625e] dark:text-[#a59b96]">
+                Total Outstanding Balance
+              </div>
+              <div
+                data-testid="snapshot-outstanding-balance"
+                className="text-2xl font-bold tabular-nums mt-1 text-[#7a2e4a] dark:text-[#d77a9c]"
+              >
+                PKR {snapshot.totalOutstandingBalancePkr.toLocaleString()}
+              </div>
+              <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96] mt-0.5 tabular-nums">
+                Across {snapshot.salonsWithBalanceCount} of {snapshot.totalSalonsCount} salons
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSection("collections")}
+              className="min-h-[36px] px-3 py-1.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold text-[#7a2e4a] dark:text-[#d77a9c] hover:border-[#7a2e4a] whitespace-nowrap shrink-0 transition-colors"
+            >
+              View Receivables
+            </button>
+          </div>
+        </div>
+      </section>
 
       {/* KPI Strip */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -374,61 +494,166 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
           </div>
 
           {/* Order Intake Cards */}
-          <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-sm flex items-center gap-2">
-                <Package className="w-4 h-4 text-[#7a2e4a] dark:text-[#d77a9c]" />
-                <span>Order Intake Cards</span>
-              </h3>
-              <span className="text-xs text-[#6b625e] dark:text-[#a59b96] tabular-nums">
-                {data.pendingOrderCards.length} pending
-              </span>
-            </div>
+          {(() => {
+            const pendingCardIds = data.pendingOrderCards.map((c) => c.id);
+            const pendingCardIdSet = new Set(pendingCardIds);
+            const activeSelectedCardIds = selectedOrderCardIds.filter((id) =>
+              pendingCardIdSet.has(id),
+            );
+            const activeSelectedCardSet = new Set(activeSelectedCardIds);
+            const allCardsSelected =
+              pendingCardIds.length > 0 &&
+              pendingCardIds.every((id) => activeSelectedCardSet.has(id));
+            const someCardsSelected = pendingCardIds.some((id) =>
+              activeSelectedCardSet.has(id),
+            );
+            const selectedSummary = summarizeSelectedOrderCards(
+              data.pendingOrderCards,
+              activeSelectedCardIds,
+            );
 
-            {data.pendingOrderCards.length === 0 ? (
-              <div className="py-8 text-center text-xs text-[#6b625e] dark:text-[#a59b96]">
-                No pending order intake cards awaiting dispatch conversion.
-              </div>
-            ) : (
-              <div className="divide-y divide-[#e6dfdb]/60 dark:divide-[#3a3330]">
-                {data.pendingOrderCards.map((card) => (
-                  <div key={card.id} className="py-3 first:pt-0 last:pb-0 space-y-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <div className="font-bold text-sm">{card.salonName}</div>
-                        <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                          {card.qty}x {card.skuName} · {when(card.capturedAt)}
-                        </div>
-                      </div>
-                      <span className="font-bold text-xs text-[#7a2e4a] dark:text-[#d77a9c] tabular-nums shrink-0">
-                        PKR {card.totalAmount.toLocaleString()}
-                      </span>
-                    </div>
-                    <div className="flex gap-2">
+            const toggleSelectOrderCard = (cardId: string) => {
+              setSelectedOrderCardIds((prev) =>
+                prev.includes(cardId)
+                  ? prev.filter((id) => id !== cardId)
+                  : [...prev, cardId],
+              );
+            };
+
+            const toggleSelectAllCards = () => {
+              if (allCardsSelected) {
+                setSelectedOrderCardIds([]);
+              } else {
+                setSelectedOrderCardIds(pendingCardIds);
+              }
+            };
+
+            return (
+              <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="font-bold text-sm flex items-center gap-2">
+                    <Package className="w-4 h-4 text-[#7a2e4a] dark:text-[#d77a9c]" />
+                    <span>Order Intake Cards</span>
+                  </h3>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-[#6b625e] dark:text-[#a59b96] tabular-nums">
+                      {data.pendingOrderCards.length} pending
+                    </span>
+                    {data.pendingOrderCards.length > 0 && (
                       <button
                         type="button"
-                        disabled={busyId === card.id}
-                        onClick={() => runAction({ action: "approve_order_card", id: card.id })}
-                        className="px-3 py-1.5 rounded-lg bg-[#7a2e4a] text-white text-xs font-semibold flex items-center gap-1 disabled:opacity-50"
+                        aria-pressed={cardBulkMode}
+                        onClick={() => {
+                          setCardBulkMode((prev) => {
+                            if (prev) setSelectedOrderCardIds([]);
+                            return !prev;
+                          });
+                        }}
+                        className={`min-h-[34px] px-3 py-1 rounded-xl border text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors ${
+                          cardBulkMode
+                            ? "bg-[#7a2e4a] text-white border-[#7a2e4a]"
+                            : "bg-white dark:bg-[#171413] border-[#e6dfdb] dark:border-[#3a3330] text-[#1d1a19] dark:text-[#f2eeec] hover:border-[#7a2e4a]"
+                        }`}
                       >
-                        <Check className="w-3.5 h-3.5" />
-                        <span>Convert to Delivery</span>
+                        <Layers className="w-3.5 h-3.5" />
+                        <span>{cardBulkMode ? "Cancel Bulk" : "Bulk Process"}</span>
                       </button>
-                      <button
-                        type="button"
-                        disabled={busyId === card.id}
-                        onClick={() => runAction({ action: "reject_order_card", id: card.id })}
-                        className="px-3 py-1.5 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-medium text-rose-600 flex items-center gap-1"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                        <span>Decline</span>
-                      </button>
-                    </div>
+                    )}
                   </div>
-                ))}
+                </div>
+
+                {cardBulkMode && data.pendingOrderCards.length > 0 && (
+                  <OrderCardBulkBar
+                    pendingCount={data.pendingOrderCards.length}
+                    selectedCount={selectedSummary.selectedCount}
+                    selectedTotalPkr={selectedSummary.totalAmountPkr}
+                    allSelected={allCardsSelected}
+                    someSelected={someCardsSelected}
+                    onToggleSelectAll={toggleSelectAllCards}
+                    onOpenBulkModal={(decision) =>
+                      setBulkCardConfirm({
+                        cards: selectedSummary.selectedCards,
+                        decision,
+                      })
+                    }
+                  />
+                )}
+
+                {data.pendingOrderCards.length === 0 ? (
+                  <div className="py-8 text-center text-xs text-[#6b625e] dark:text-[#a59b96]">
+                    No pending order intake cards awaiting dispatch conversion.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-[#e6dfdb]/60 dark:divide-[#3a3330]">
+                    {data.pendingOrderCards.map((card) => {
+                      const isChecked = activeSelectedCardSet.has(card.id);
+                      return (
+                        <div key={card.id} className="py-3 first:pt-0 last:pb-0 space-y-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-start gap-2.5 min-w-0">
+                              {cardBulkMode && (
+                                <label
+                                  aria-label={`Select order card for ${card.salonName || "Salon"}`}
+                                  className="min-h-[36px] min-w-[26px] -ml-0.5 flex items-center justify-center cursor-pointer shrink-0"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    onChange={() => toggleSelectOrderCard(card.id)}
+                                    className="w-4 h-4 rounded accent-[#7a2e4a] cursor-pointer"
+                                  />
+                                </label>
+                              )}
+                              <div className="min-w-0">
+                                <div className="font-bold text-sm">{card.salonName}</div>
+                                <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                                  {card.qty}x {card.skuName} · {when(card.capturedAt)}
+                                </div>
+                                {card.notes && (
+                                  <div className="mt-1 text-xs text-[#7a2e4a] dark:text-[#d77a9c] bg-[#faf7f5] dark:bg-[#171413] px-2.5 py-1.5 rounded-lg border border-[#e6dfdb]/80 dark:border-[#3a3330]">
+                                    Note: {card.notes}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                            <span className="font-bold text-xs text-[#7a2e4a] dark:text-[#d77a9c] tabular-nums shrink-0">
+                              PKR {card.totalAmount.toLocaleString()}
+                            </span>
+                          </div>
+                          {!cardBulkMode && (
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                disabled={busyId === card.id}
+                                onClick={() =>
+                                  runAction({ action: "approve_order_card", id: card.id })
+                                }
+                                className="px-3 py-1.5 rounded-lg bg-[#7a2e4a] text-white text-xs font-semibold flex items-center gap-1 disabled:opacity-50"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                                <span>Convert to Delivery</span>
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busyId === card.id}
+                                onClick={() =>
+                                  runAction({ action: "reject_order_card", id: card.id })
+                                }
+                                className="px-3 py-1.5 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-medium text-rose-600 flex items-center gap-1"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                                <span>Decline</span>
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            );
+          })()}
 
           {/* Rep Shift Bag Variance */}
           <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] space-y-3 lg:col-span-2">
@@ -528,21 +753,36 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
           <div className="lg:col-span-2 p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="font-bold text-sm">Salon Credit & Receivables</h3>
-              <div className="flex items-center gap-2 w-full sm:w-auto">
-                <div className="relative w-full sm:w-52">
-                  <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-[#6b625e]" />
+              <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                <div className="relative flex-1 sm:w-48">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-3 text-[#6b625e]" />
                   <input
                     type="text"
                     placeholder="Filter salons..."
                     value={salonQuery}
                     onChange={(e) => setSalonQuery(e.target.value)}
-                    className="w-full pl-8 pr-3 py-1.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+                    className="w-full min-h-[38px] pl-8 pr-3 py-1.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
                   />
+                </div>
+                <div className="relative shrink-0">
+                  <ArrowUpDown className="w-3.5 h-3.5 absolute left-2.5 top-3 text-[#6b625e] pointer-events-none" />
+                  <select
+                    aria-label="Sort manager salons by"
+                    value={salonSort}
+                    onChange={(e) => setSalonSort(e.target.value as SalonSortKey)}
+                    className="min-h-[38px] pl-8 pr-3 py-1.5 text-xs font-medium rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413] text-[#1d1a19] dark:text-[#f2eeec]"
+                  >
+                    {SALON_SORT_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        Sort: {opt.label}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <button
                   type="button"
                   onClick={() => setShowBulkImport(true)}
-                  className="px-3 py-1.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-black/5 dark:bg-white/5 text-xs font-semibold hover:border-[#7a2e4a] flex items-center gap-1 shrink-0"
+                  className="min-h-[38px] px-3 py-1.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-black/5 dark:bg-white/5 text-xs font-semibold hover:border-[#7a2e4a] flex items-center gap-1 shrink-0 whitespace-nowrap"
                 >
                   <FileSpreadsheet className="w-3.5 h-3.5 text-[#7a2e4a] dark:text-[#d77a9c]" />
                   <span>Bulk Import</span>
@@ -561,11 +801,13 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#e6dfdb]/60 dark:divide-[#3a3330]">
-                  {filteredSalons.map((s) => (
+                  {sortedSalons.map((s) => (
                     <tr key={s.id}>
                       <td className="py-2.5 pr-3">
                         <div className="font-semibold">{s.name}</div>
-                        <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">{s.area}</div>
+                        <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                          {s.area} · {s.last_visited_at ? `Visited ${when(s.last_visited_at)}` : "Never visited"}
+                        </div>
                       </td>
                       <td className="py-2.5 px-3 capitalize">{s.stage}</td>
                       <td
@@ -929,6 +1171,11 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                                 <div className="text-[#6b625e] dark:text-[#a59b96]">
                                   {ord.items.map((i) => `${i.qty}x ${i.sku_name}`).join(", ")}
                                 </div>
+                                {ord.notes && (
+                                  <div className="text-[11px] text-[#7a2e4a] dark:text-[#d77a9c] mt-0.5">
+                                    Note: {ord.notes}
+                                  </div>
+                                )}
                                 {ord.delivered_at && (
                                   <div className="text-[11px] text-emerald-700 dark:text-emerald-400 mt-0.5">
                                     Delivered {when(ord.delivered_at)}
@@ -1072,6 +1319,17 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
         isSubmitting={markingBulkDelivered}
         onCancel={() => setBulkConfirmOrders([])}
         onConfirm={handleConfirmBulkMarkDelivered}
+      />
+
+      <ConfirmBulkOrderCardsModal
+        cards={bulkCardConfirm?.cards ?? []}
+        decision={bulkCardConfirm?.decision ?? null}
+        isSubmitting={processingBulkCards}
+        onChangeDecision={(decision) =>
+          setBulkCardConfirm((prev) => (prev ? { ...prev, decision } : null))
+        }
+        onCancel={() => setBulkCardConfirm(null)}
+        onConfirm={handleConfirmBulkOrderCards}
       />
     </div>
   );
