@@ -1,4 +1,5 @@
-import { apiFetch } from "../api";
+import { apiFetch, getAuthMode } from "../api";
+import { dispatchLiveOutboxRpc } from "../supabase-kiran";
 import { type DrainReport, drain } from "./drain";
 import { enqueue, retry } from "./queue";
 import { openIdbStore } from "./store-idb";
@@ -146,7 +147,7 @@ export function setSessionUserId(id: string) {
   }
 }
 
-// Real backend RPC dispatcher (replaces in-browser mock)
+// Direct Supabase app.* RPC dispatcher when authenticated with Supabase, Express fallback in demo mode
 const serverDispatch = async (fn: OutboxFn, args: Record<string, unknown>, itemId?: string): Promise<unknown> => {
   const id = itemId || (args.p_id as string) || (args.id as string);
   if (id) setItemProgress(id, 25);
@@ -158,10 +159,13 @@ const serverDispatch = async (fn: OutboxFn, args: Record<string, unknown>, itemI
 
   try {
     if (id && inFlightItemIds.has(id)) setItemProgress(id, 60);
-    const result = await apiFetch<Record<string, unknown>>(`/api/rpc/${encodeURIComponent(fn)}`, {
-      method: "POST",
-      body: JSON.stringify({ args }),
-    });
+    const result =
+      getAuthMode() === "supabase"
+        ? await dispatchLiveOutboxRpc(fn, args)
+        : await apiFetch<Record<string, unknown>>(`/api/rpc/${encodeURIComponent(fn)}`, {
+            method: "POST",
+            body: JSON.stringify({ args }),
+          });
     if (id) {
       setItemProgress(id, 100);
       await new Promise((r) => setTimeout(r, 80));

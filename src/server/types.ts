@@ -1,7 +1,8 @@
+import type { CatalogSkuInput } from "../lib/catalog.ts";
 import type { DeliveryOrder, RouteStop, SKU, Salon } from "../lib/data.ts";
 import type { OutboxFn } from "../lib/outbox/types.ts";
 
-export type UserRole = "rep" | "manager";
+export type UserRole = "rep" | "manager" | "owner";
 
 export interface UserProfile {
   id: string;
@@ -10,6 +11,17 @@ export interface UserProfile {
   role: UserRole;
   territory: string;
   monthlyVisitTarget: number;
+  deviceStatus?: "pending" | "approved" | "revoked" | null;
+  accountStatus?: "active" | "suspended" | "offboarded";
+  aalLevel?: "aal1" | "aal2" | null;
+  mfaRequired?: boolean;
+}
+
+export interface SalonAreaOption {
+  id: string;
+  name: string;
+  territoryId?: string;
+  territoryName?: string;
 }
 
 export interface RepShift {
@@ -45,6 +57,15 @@ export interface PaymentRecord {
   amount: number;
   method: string;
   capturedAt: string;
+  receiptNumber?: string | null;
+  bankName?: string | null;
+  bankReference?: string | null;
+  recordedByName?: string | null;
+  recordedByRole?: UserRole;
+  reversed?: boolean;
+  reversalReason?: string | null;
+  reversedAt?: string | null;
+  mayReverse?: boolean;
 }
 
 export interface OrderCardRecord {
@@ -112,6 +133,7 @@ export interface BootstrapPayload {
   activeShift: RepShift | null;
   currentBagCount: number;
   stats: RepMonthlyStats;
+  areas?: SalonAreaOption[];
   authMode: "supabase" | "demo";
 }
 
@@ -158,7 +180,20 @@ export type ManagerApprovalAction =
   | { action: "flag_shift"; id: string }
   | { action: "update_shop_order_status"; id: string; status: "pending" | "confirmed" | "dispatched" }
   | { action: "mark_delivery_delivered"; id: string }
-  | { action: "mark_deliveries_delivered"; ids: string[] };
+  | { action: "mark_deliveries_delivered"; ids: string[] }
+  | {
+      action: "record_office_payment";
+      salonId: string;
+      method: "bank_transfer" | "cash";
+      amountPkr: number;
+      bankName?: string;
+      bankReference?: string;
+    }
+  | {
+      action: "reverse_office_payment";
+      paymentId: string;
+      reason: string;
+    };
 
 export interface DeliveryNotificationResult {
   ok: true;
@@ -196,7 +231,8 @@ export interface KiranRepository {
   createShopOrder(input: CreateShopOrderInput): Promise<PublicShopOrder>;
   listShopOrders(): Promise<PublicShopOrder[]>;
   getManagerOverview(user: UserProfile): Promise<ManagerOverviewPayload>;
-  handleManagerApproval(input: ManagerApprovalAction): Promise<{ ok: true; message: string }>;
+  handleManagerApproval(input: ManagerApprovalAction, actor?: UserProfile): Promise<{ ok: true; message: string }>;
   notifyDelivery(orderId: string): Promise<DeliveryNotificationResult>;
   bulkImportSalons(salons: BulkSalonInput[], createdBy: string): Promise<number>;
+  upsertCatalogSku(input: CatalogSkuInput, existingId?: string): Promise<SKU>;
 }

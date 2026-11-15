@@ -57,14 +57,17 @@ class ResilientKiranRepository implements KiranRepository {
   getManagerOverview: KiranRepository["getManagerOverview"] = (user) =>
     this.run((repo) => repo.getManagerOverview(user));
 
-  handleManagerApproval: KiranRepository["handleManagerApproval"] = (input) =>
-    this.run((repo) => repo.handleManagerApproval(input));
+  handleManagerApproval: KiranRepository["handleManagerApproval"] = (input, actor) =>
+    this.run((repo) => repo.handleManagerApproval(input, actor));
 
   notifyDelivery: KiranRepository["notifyDelivery"] = (orderId) =>
     this.run((repo) => repo.notifyDelivery(orderId));
 
   bulkImportSalons: KiranRepository["bulkImportSalons"] = (salons, createdBy) =>
     this.run((repo) => repo.bulkImportSalons(salons, createdBy));
+
+  upsertCatalogSku: KiranRepository["upsertCatalogSku"] = (input, existingId) =>
+    this.run((repo) => repo.upsertCatalogSku(input, existingId));
 }
 
 export function getRepository(): KiranRepository {

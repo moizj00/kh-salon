@@ -76,7 +76,7 @@ export function downloadDeliveryOrdersCsv(
   const csvBody = buildDeliveryOrdersCsv(orders, salons);
   const dateStamp = new Date().toISOString().slice(0, 10);
   const safeFilter = filterLabel.replace(/[^a-z0-9_-]/gi, "-").toLowerCase();
-  const filename = `kiran-deliveries-${safeFilter}-${dateStamp}.csv`;
+  const filename = `lumex-deliveries-${safeFilter}-${dateStamp}.csv`;
 
   const blob = new Blob(["\uFEFF" + csvBody], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);

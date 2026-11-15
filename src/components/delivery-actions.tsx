@@ -197,7 +197,7 @@ export const DeliveryReceiptModal: React.FC<DeliveryReceiptModalProps> = ({
         <div className="p-5 border-b border-[#e6dfdb] dark:border-[#3a3330] flex items-start justify-between gap-3">
           <div>
             <div className="text-[11px] font-semibold text-[#7a2e4a] dark:text-[#d77a9c]">
-              KH Enterprises · Kiran DMS Official Receipt
+              Lumex · Official Delivery Receipt
             </div>
             <h3
               id="delivery-receipt-title"

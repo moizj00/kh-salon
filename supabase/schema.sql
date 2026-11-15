@@ -8,7 +8,7 @@ create table if not exists public.rep_profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   email text not null unique,
   full_name text not null,
-  role text not null default 'rep' check (role in ('rep', 'manager')),
+  role text not null default 'rep' check (role in ('rep', 'manager', 'owner')),
   territory text not null default 'Karachi Central',
   monthly_visit_target integer not null default 50,
   created_at timestamptz not null default now()
@@ -41,8 +41,19 @@ create table if not exists public.skus (
   category text not null check (category in ('Treatment', 'Styling', 'Color', 'Shampoo')),
   price integer not null,
   bag_qty integer not null default 0,
-  unit text not null
+  unit text not null,
+  brand text,
+  product_type text,
+  volume_size text,
+  recommended_use text,
+  image_key text
 );
+
+alter table public.skus add column if not exists brand text;
+alter table public.skus add column if not exists product_type text;
+alter table public.skus add column if not exists volume_size text;
+alter table public.skus add column if not exists recommended_use text;
+alter table public.skus add column if not exists image_key text;
 
 -- 4. Daily Scheduled Route Stops
 create table if not exists public.route_stops (
@@ -178,14 +189,28 @@ values
   ('sal-tariq-05', 'Glamour Zone Tariq Road', 'PECHS Block 2, Tariq Road', 'Mezzanine Floor, Dolmen Centre', '0301-7788990', 'Zeeshan Khan', 'prospect', 'pending_review', 0, 20000, null, 0, 0)
 on conflict (id) do nothing;
 
-insert into public.skus (id, sku_code, name, category, price, bag_qty, unit)
+insert into public.skus (id, sku_code, name, category, price, bag_qty, unit, brand, product_type, volume_size, recommended_use, image_key)
 values
-  ('sku-krt-500', 'KRN-KRT-500', 'Kiran Brazilian Keratin Complex 500ml', 'Treatment', 6800, 8, 'Bottle'),
-  ('sku-arg-100', 'KRN-ARG-100', 'Moroccan Argan Elixir Serum 100ml', 'Styling', 2450, 12, 'Dropper'),
-  ('sku-shm-1000', 'KRN-SHM-1L', 'Post-Chemical Clarifying Shampoo 1L', 'Shampoo', 3200, 6, 'Dispenser'),
-  ('sku-clr-06', 'KRN-CLR-06', 'Salon Professional Hair Color Tube 60ml (Ash Brown 6.1)', 'Color', 850, 24, 'Tube'),
-  ('sku-msk-500', 'KRN-MSK-500', 'Collagen & Biotin Intense Hair Mask 500g', 'Treatment', 3800, 5, 'Jar')
-on conflict (id) do nothing;
+  ('sku-krt-500', 'KRN-KRT-500', 'Kiran Brazilian Keratin Complex 500ml', 'Treatment', 6800, 8, 'Bottle', 'Kiran Professional', 'Keratin Smoothing Treatment', '500ml', 'Full keratin straightening service on pre-clarified hair; blow-dry 100% and flat-iron seal at 230°C.', 'kiran-keratin'),
+  ('sku-arg-100', 'KRN-ARG-100', 'Moroccan Argan Elixir Serum 100ml', 'Styling', 2450, 12, 'Dropper', 'Kiran Professional', 'Gloss & Heat Shield Elixir', '100ml', 'Apply 2–3 drops on damp lengths prior to blow-dry or finish dry ends for frizz-free salon shine.', 'mocheqi-serum'),
+  ('sku-shm-1000', 'KRN-SHM-1L', 'Post-Chemical Clarifying Shampoo 1L', 'Shampoo', 3200, 6, 'Dispenser', 'Kemon', 'Color-Safe Clarifying Shampoo', '1000ml', 'Backwash cleansing for color-treated and post-keratin clients; gently removes residue without stripping tone.', 'kemon-shampoo'),
+  ('sku-clr-06', 'KRN-CLR-06', 'Salon Professional Hair Color Tube 60ml (Ash Brown 6.1)', 'Color', 850, 24, 'Tube', 'Mocheqi Musk', 'Permanent Hair Color Cream', '60ml', 'Mix 1:1.5 with 20Vol or 30Vol developer for 100% grey coverage and cool ash-brown reflection.', 'musk-color'),
+  ('sku-msk-500', 'KRN-MSK-500', 'Collagen & Biotin Intense Hair Mask 500g', 'Treatment', 3800, 5, 'Jar', 'Kiran Professional', 'Deep Repair Conditioning Mask', '500g', 'Backwash reconstruction treatment after bleaching or perming; process 10 min under warm steam.', 'mocheqi-mask'),
+  ('sku-msk-shampoo-318', 'MSK-SHM-318', 'Mocheqi Musk Nourishing Anti-Grease Shampoo 318ml', 'Shampoo', 2400, 10, 'Bottle', 'Mocheqi Musk', 'Anti-Grease Balancing Shampoo', '318ml', 'Daily salon and retail scalp wash to balance excess sebum while soothing dry, sensitized mid-lengths.', 'mocheqi-shampoo'),
+  ('sku-msk-mask-500', 'MSK-TRT-500', 'Mocheqi Musk Nutrient Moisturizing Hair Mask 500ml', 'Treatment', 3600, 7, 'Tub', 'Mocheqi Musk', 'Nutrient Moisturizing Hair Mask', '500ml', 'Rich keratin & argan backwash mask for brittle or color-processed hair; leave 12 min before cool rinse.', 'mocheqi-mask'),
+  ('sku-msk-serum-150', 'MSK-SRM-150', 'Mocheqi Musk Argan Frizz-Free Hair Serum 150ml', 'Styling', 2650, 12, 'Pump', 'Mocheqi Musk', 'Frizz-Control Argan Serum', '150ml', 'Smooth 2 pumps across damp hair before blow-drying or flat-ironing to seal cuticles and tame humidity.', 'mocheqi-serum'),
+  ('sku-msk-oil-60', 'MSK-OIL-060', 'Mocheqi Musk Macadamia & Keratin Repair Oil 60ml', 'Treatment', 1950, 4, 'Bottle', 'Mocheqi Musk', 'Concentrated Repair Treatment Oil', '60ml', 'Add 3–5 drops into hair color mixtures for cuticle protection or massage onto split ends post-styling.', 'mocheqi-serum'),
+  ('sku-lmx-clarify-1000', 'LMX-CLF-1L', 'Lumex Clarifying Pre-Keratin Shampoo 1000ml', 'Shampoo', 4100, 6, 'Dispenser', 'Lumex', 'Pre-Treatment Clarifying Shampoo', '1000ml', 'Double-wash prior to keratin or hair botox application to strip styling buildup and gently open hair cuticles.', 'lumex-clarifying'),
+  ('sku-lmx-botox-500', 'LMX-BTX-500', 'Lumex Botox & Keratin Restructuring Complex 500ml', 'Treatment', 7200, 5, 'Bottle', 'Lumex', 'Keratin & Hair Botox Complex', '500ml', 'Apply evenly on 80% dried clarified hair; process 30 min, blow-dry sleek, and flat-iron seal in thin passes.', 'lumex-keratin'),
+  ('sku-lmx-toner-300', 'LMX-TON-300', 'Lumex Ice Blonde Toning Shampoo 300ml', 'Color', 2900, 3, 'Bottle', 'Lumex', 'Violet Anti-Brass Toning Shampoo', '300ml', 'Emulsify at the backwash on pre-lightened blonde or balayage hair for 3–5 min to neutralize yellow brass.', 'lumex-toning'),
+  ('sku-lmx-gloss-120', 'LMX-GLS-120', 'Lumex Silk Gloss Thermal Shield Serum 120ml', 'Styling', 2300, 9, 'Pump', 'Lumex', 'Thermal Protection Finishing Serum', '120ml', 'Apply a pea-sized dose to mid-lengths and ends before thermal styling for 230°C heat protection and gloss.', 'mocheqi-serum'),
+  ('sku-lnx-bleach-500', 'LNX-BLC-500', 'Lunex Ultra Decolor Lightening Powder 500g', 'Color', 4200, 6, 'Tub', 'Lunex', 'Dust-Free Lightening Powder', '500g', 'Mix 1:2 in a non-metallic bowl with developer (20Vol/30Vol) for foil highlights and clean up-to-7-level lift.', 'lunex-bleach')
+on conflict (id) do update set
+  brand = excluded.brand,
+  product_type = excluded.product_type,
+  volume_size = excluded.volume_size,
+  recommended_use = excluded.recommended_use,
+  image_key = excluded.image_key;
 
 insert into public.route_stops (id, salon_id, salon_name, area, stop_number, due_reason, status, balance)
 values

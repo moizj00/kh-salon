@@ -15,9 +15,13 @@ import {
   getAuthToken,
   getCurrentUser,
   resendDeliveryNotification,
+  setActiveSessionUser,
   setAuthToken,
+  signOutEverywhere,
   submitManagerApproval,
+  syncRouteOrderApi,
 } from "./lib/api";
+import { deviceId } from "./lib/supabase";
 import {
   discardItem,
   isOffline,
@@ -36,6 +40,7 @@ import type { OutboxItem, SyncAttempt } from "./lib/outbox/types";
 import { cachedRows } from "./lib/cache";
 import { KARACHI_DEFAULT_CENTER } from "./lib/karachi-geo";
 import { registerServiceWorker } from "./lib/register-sw";
+import { canManageCatalog, getSkuBrand } from "./lib/catalog";
 import { filterOrderSkus } from "./lib/order-sku-search";
 import { checkOrderIntakeStock, DEFAULT_LOW_STOCK_THRESHOLD } from "./lib/order-stock";
 import {
@@ -59,6 +64,8 @@ import { DeliveryMapView } from "./components/delivery-map-view";
 import { ManagerDashboard } from "./components/manager-dashboard";
 import { BottomNavigation, type TabKey } from "./components/navigation";
 import { OutboxStatus } from "./components/outbox-status";
+import { ProductCatalogDrawer } from "./components/product-catalog-drawer";
+import { ProductThumbnail } from "./components/product-thumbnail";
 import { PWAInstallButton } from "./components/pwa-install";
 import { RepMonth } from "./components/rep-month";
 import { SignaturePad } from "./components/signature-pad";
@@ -67,6 +74,7 @@ import type {
   DeliveryOrderFull,
   RepMonthlyStats,
   SalonActivityPayload,
+  SalonAreaOption,
   SalonWithApproval,
   UserProfile,
 } from "./server/types";
@@ -74,12 +82,12 @@ import {
   AlertTriangle,
   ArrowLeft,
   ArrowUpDown,
+  BookOpen,
   Briefcase,
   CalendarCheck,
   Check,
   CheckCircle2,
   Clock,
-  Coins,
   FileText,
   History,
   List,
@@ -125,11 +133,10 @@ export default function App() {
   const [skus, setSkus] = useState<SKU[]>(INITIAL_SKUS);
   const [monthlyStats, setMonthlyStats] = useState<RepMonthlyStats>(DEFAULT_STATS);
 
-  // Rep day shift state
+  // Rep day shift state (one-tap check-in / check-out, no sample bag counts)
   const [dayOpen, setDayOpen] = useState(false);
-  const [bagCount, setBagCount] = useState(24);
-  const [showCheckInModal, setShowCheckInModal] = useState(false);
-  const [showCheckOutModal, setShowCheckOutModal] = useState(false);
+  const [areas, setAreas] = useState<SalonAreaOption[]>([]);
+  const [newSalonAreaId, setNewSalonAreaId] = useState("");
 
   // Selected salon for details & live activity
   const [selectedSalonId, setSelectedSalonId] = useState<string | null>(null);
@@ -142,9 +149,8 @@ export default function App() {
   // Sub-dialogs
   const [showVisitModal, setShowVisitModal] = useState(false);
   const [visitNotes, setVisitNotes] = useState("");
-  const [showPaymentModal, setShowPaymentModal] = useState(false);
-  const [paymentAmount, setPaymentAmount] = useState("");
   const [showCardModal, setShowCardModal] = useState(false);
+  const [showCatalogDrawer, setShowCatalogDrawer] = useState(false);
   const [selectedSkuId, setSelectedSkuId] = useState(INITIAL_SKUS[0]?.id || "");
   const [skuSearchQuery, setSkuSearchQuery] = useState("");
   const [cardQty, setCardQty] = useState(2);
@@ -197,8 +203,12 @@ export default function App() {
         setSkus(boot.skus);
         setOrders(boot.orders);
         setDayOpen(Boolean(boot.activeShift));
-        setBagCount(boot.currentBagCount);
         setMonthlyStats(boot.stats);
+        if (boot.areas && boot.areas.length > 0) {
+          setAreas(boot.areas);
+          setNewSalonAreaId((prev) => prev || boot.areas![0]!.id);
+          setNewSalonArea((prev) => prev || boot.areas![0]!.name);
+        }
         return boot.salons;
       });
       setSalons(res.rows);
@@ -231,21 +241,23 @@ export default function App() {
     let mounted = true;
 
     const init = async () => {
+      let supabaseReady = false;
       try {
         const cfg = await getAuthConfig();
+        supabaseReady = Boolean(cfg.supabaseConfigured);
         if (mounted) setAuthConfigured(cfg.authConfigured);
       } catch {
         // Ignore offline config fetch error
       }
 
       const token = getAuthToken();
-      if (token) {
+      if (token || supabaseReady) {
         try {
           const { user: current } = await getCurrentUser();
-          if (mounted) {
+          if (mounted && !current.mfaRequired) {
             setUser(current);
             setSessionUserId(current.id);
-            setWorkspaceMode(current.role === "manager" ? "manager" : "rep");
+            setWorkspaceMode(canManageCatalog(current.role) ? "manager" : "rep");
           }
         } catch {
           setAuthToken(null);
@@ -318,11 +330,12 @@ export default function App() {
   const handleAuthenticated = (authedUser: UserProfile) => {
     setUser(authedUser);
     setSessionUserId(authedUser.id);
-    setWorkspaceMode(authedUser.role === "manager" ? "manager" : "rep");
+    setWorkspaceMode(canManageCatalog(authedUser.role) ? "manager" : "rep");
   };
 
   const handleSignOut = () => {
-    setAuthToken(null);
+    void signOutEverywhere();
+    setActiveSessionUser(null);
     setUser(null);
     setSelectedSalonId(null);
     setWorkspaceMode("rep");
@@ -345,22 +358,41 @@ export default function App() {
   const pendingItems = items.filter((i) => i.state === "pending");
   const currentSalon = salons.find((s) => s.id === selectedSalonId) || null;
 
-  // 1. Check in Rep Day
-  const handleCheckIn = async (count: number) => {
-    setShowCheckInModal(false);
+  // 1. Check in Rep Day (one-tap check-in, no bag stock counts)
+  const handleCheckIn = async () => {
+    let gps: { lat: number; lng: number } | null = null;
+    if (typeof navigator !== "undefined" && "geolocation" in navigator) {
+      gps = await new Promise((resolve) => {
+        navigator.geolocation.getCurrentPosition(
+          (p) =>
+            resolve({
+              lat: Number(p.coords.latitude.toFixed(6)),
+              lng: Number(p.coords.longitude.toFixed(6)),
+            }),
+          () => resolve(null),
+          { enableHighAccuracy: false, timeout: 2500, maximumAge: 60000 },
+        );
+      });
+    }
+
     const id = `chk-${Date.now()}`;
     const res = await submit({
       id,
       fn: "rep_check_in",
-      args: { p_id: id, p_bag_count: count, p_at_client: new Date().toISOString() },
-      label: `Day Check-In (${count} units in bag)`,
+      args: {
+        p_id: id,
+        p_counted: [],
+        p_lat: gps?.lat ?? null,
+        p_lng: gps?.lng ?? null,
+        p_at_client: new Date().toISOString(),
+      },
+      label: "Day Check-In",
       salonId: null,
       capturedAt: new Date().toISOString(),
     });
 
     if (res !== "rejected") {
       setDayOpen(true);
-      setBagCount(count);
     }
 
     if (res === "queued") {
@@ -368,48 +400,28 @@ export default function App() {
     } else if (res === "rejected") {
       showToast("Check-in rejected by server. Review Outbox.", "warn");
     } else {
-      showToast(`Day opened with ${count} units counted.`, "ok");
+      showToast("Day shift opened.", "ok");
       void refreshBootstrap();
     }
   };
 
   // 2. Check out Rep Day (Daily Close)
-  const handleCheckOut = async (count: number) => {
-    setShowCheckOutModal(false);
-    const countId = `cnt-${Date.now()}`;
-    const countRes = await submit({
-      id: countId,
-      fn: "record_count",
-      args: { p_id: countId, p_count: count, p_at_client: new Date().toISOString() },
-      label: `Daily Close Bag Count (${count} units)`,
-      salonId: null,
-      capturedAt: new Date().toISOString(),
-    });
-
-    if (countRes === "rejected") {
-      showToast("Bag count was rejected by server. Review Outbox.", "warn");
-      return;
-    }
-
+  const handleCheckOut = async () => {
     const closeId = `cls-${Date.now()}`;
     const res = await submit({
       id: closeId,
       fn: "rep_check_out",
       args: {
         p_id: closeId,
-        p_count_id: countId,
-        p_count: count,
         p_at_client: new Date().toISOString(),
       },
       label: "End Day Shift Check-Out",
       salonId: null,
       capturedAt: new Date().toISOString(),
-      dependsOn: { itemId: countId, argName: "p_count_id" },
     });
 
     if (res !== "rejected") {
       setDayOpen(false);
-      setBagCount(count);
     }
 
     if (res === "queued") {
@@ -417,7 +429,7 @@ export default function App() {
     } else if (res === "rejected") {
       showToast("Daily close rejected by server. Review Outbox.", "warn");
     } else {
-      showToast("Day shift closed. Variance calculated and recorded.", "ok");
+      showToast("Day shift closed and recorded.", "ok");
       void refreshBootstrap();
     }
   };
@@ -465,45 +477,6 @@ export default function App() {
       showToast(`Visit for ${currentSalon.name} saved on phone${gpsMsg}.`, "info");
     } else {
       showToast(`Visit logged${gpsMsg} and synced to server.`, "ok");
-      void refreshBootstrap();
-      void loadSalonActivity(currentSalon.id);
-    }
-  };
-
-  // 4. Record Cash Payment
-  const handleRecordPayment = async () => {
-    if (!currentSalon || !paymentAmount) return;
-    const amount = Number(paymentAmount);
-    if (isNaN(amount) || amount <= 0) return;
-
-    setShowPaymentModal(false);
-    const id = `pay-${Date.now()}`;
-    const res = await submit({
-      id,
-      fn: "rep_record_payment",
-      args: {
-        p_id: id,
-        p_salon_id: currentSalon.id,
-        p_amount: amount,
-        p_method: "cash",
-        p_at_client: new Date().toISOString(),
-      },
-      label: `Cash: PKR ${amount.toLocaleString()} from ${currentSalon.name}`,
-      salonId: currentSalon.id,
-      capturedAt: new Date().toISOString(),
-    });
-
-    setPaymentAmount("");
-    setSalons((prev) =>
-      prev.map((s) =>
-        s.id === currentSalon.id ? { ...s, outstanding_balance: Math.max(0, s.outstanding_balance - amount) } : s,
-      ),
-    );
-
-    if (res === "queued") {
-      showToast(`PKR ${amount.toLocaleString()} saved on this phone. Receipt generated after sync.`, "info");
-    } else {
-      showToast(`PKR ${amount.toLocaleString()} payment recorded and synced.`, "ok");
       void refreshBootstrap();
       void loadSalonActivity(currentSalon.id);
     }
@@ -569,6 +542,7 @@ export default function App() {
     if (!routeOptimization) return;
     setRoute(routeOptimization.optimizedRoute);
     savePreferredRouteOrder(routeOptimization.optimizedRoute);
+    void syncRouteOrderApi(routeOptimization.optimizedRoute.map((s) => s.id)).catch(() => undefined);
     const saved = routeOptimization.savedKm;
     const count = routeOptimization.pendingLegs.length;
     setRouteOptimization(null);
@@ -598,6 +572,7 @@ export default function App() {
         p_id: id,
         p_salon_id: currentSalon.id,
         p_sku_id: sku.id,
+        p_sku_name: sku.name,
         p_qty: cardQty,
         p_total: sku.price * cardQty,
         p_notes: trimmedNotes || null,
@@ -622,11 +597,13 @@ export default function App() {
     if (!newSalonName.trim()) return;
     setShowNewSalonModal(false);
     const id = `sal-${Date.now()}`;
+    const selectedArea = areas.find((a) => a.id === newSalonAreaId);
+    const areaLabel = selectedArea?.name || newSalonArea.trim() || "Karachi";
     const newRecord: SalonWithApproval = {
       id,
       name: newSalonName.trim(),
-      area: newSalonArea.trim() || "Karachi",
-      address: `${newSalonArea.trim() || "Karachi"}, Karachi`,
+      area: areaLabel,
+      address: `${areaLabel}, Karachi`,
       phone: newSalonPhone.trim() || "0300-1234567",
       contact_person: newSalonContact.trim() || "Owner",
       stage: "prospect",
@@ -646,6 +623,7 @@ export default function App() {
         p_id: id,
         p_name: newRecord.name,
         p_area: newRecord.area,
+        p_area_id: newSalonAreaId || undefined,
         p_phone: newRecord.phone,
         p_contact: newRecord.contact_person,
         p_at_client: new Date().toISOString(),
@@ -898,6 +876,40 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="max-w-md md:max-w-5xl w-full mx-auto px-4 py-5 flex-1">
+        {(user.deviceStatus === "pending" || user.deviceStatus === "revoked") && (
+          <div
+            role="status"
+            className="mb-4 p-3.5 rounded-2xl border border-amber-300 dark:border-amber-700/70 bg-amber-50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200 text-xs flex flex-wrap items-center justify-between gap-2"
+          >
+            <div className="space-y-0.5 min-w-0">
+              <div className="font-bold">
+                {user.deviceStatus === "revoked"
+                  ? "Device Access Revoked"
+                  : "Browser Device Pending Manager Approval"}
+              </div>
+              <div className="text-[11px] opacity-90">
+                Device ID <span className="font-mono">{deviceId()}</span> must be approved by an Office Manager or Owner in Supabase before protected writes sync.
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const { user: refreshed } = await getCurrentUser();
+                  setUser(refreshed);
+                  void refreshBootstrap();
+                  showToast("Device status refreshed.", "info");
+                } catch {
+                  showToast("Could not refresh device status.", "warn");
+                }
+              }}
+              className="px-3 py-1.5 rounded-xl bg-amber-900 text-white text-xs font-semibold shrink-0"
+            >
+              Refresh Status
+            </button>
+          </div>
+        )}
+
         {workspaceMode === "manager" ? (
           <ManagerDashboard
             showToast={showToast}
@@ -939,23 +951,21 @@ export default function App() {
                       {!dayOpen ? (
                         <button
                           type="button"
-                          onClick={() => setShowCheckInModal(true)}
+                          onClick={handleCheckIn}
                           className="w-full h-12 rounded-xl bg-[#7a2e4a] text-white font-semibold text-sm flex items-center justify-center gap-2 shadow-xs hover:opacity-95 transition"
                         >
                           <CalendarCheck className="w-4 h-4" />
-                          <span>Check In & Count Bag Stock</span>
+                          <span>Check In &amp; Start Day</span>
                         </button>
                       ) : (
                         <div className="flex items-center justify-between gap-3">
-                          <div className="text-xs">
-                            <span className="text-[#6b625e] dark:text-[#a59b96]">Current Bag:</span>{" "}
-                            <strong className="text-sm tabular-nums text-[#1d1a19] dark:text-[#f2eeec]">
-                              {bagCount} units
-                            </strong>
+                          <div className="text-xs font-medium text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5">
+                            <CheckCircle2 className="w-4 h-4 shrink-0" />
+                            <span>Shift Open · Active Today</span>
                           </div>
                           <button
                             type="button"
-                            onClick={() => setShowCheckOutModal(true)}
+                            onClick={handleCheckOut}
                             className="px-3.5 py-2 rounded-xl border border-rose-300 dark:border-rose-900/60 text-rose-700 dark:text-rose-400 text-xs font-semibold hover:bg-rose-50 dark:hover:bg-rose-950/40"
                           >
                             End Day (Daily Close)
@@ -1288,8 +1298,8 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Field Action Buttons */}
-                        <div className="grid grid-cols-3 gap-2 pt-2">
+                        {/* Field Action Buttons (Zero in-app payment collection) */}
+                        <div className="grid grid-cols-2 gap-2 pt-2">
                           <button
                             type="button"
                             onClick={() => setShowVisitModal(true)}
@@ -1297,15 +1307,6 @@ export default function App() {
                           >
                             <UserCheck className="w-5 h-5 text-[#7a2e4a] dark:text-[#d77a9c]" />
                             <span className="text-xs font-semibold">Log Visit</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => setShowPaymentModal(true)}
-                            className="p-3 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-center hover:border-[#7a2e4a] flex flex-col items-center justify-center gap-1.5"
-                          >
-                            <Coins className="w-5 h-5 text-emerald-600" />
-                            <span className="text-xs font-semibold">Receive Cash</span>
                           </button>
 
                           <button
@@ -1320,12 +1321,16 @@ export default function App() {
                             <span className="text-xs font-semibold">Take Order</span>
                           </button>
                         </div>
+
+                        <div className="p-2.5 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb]/80 dark:border-[#3a3330] text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                          No in-app payment collection. Off-app Bank-to-Bank and Cash-to-Cash settlements are noted and marked paid exclusively by Office Manager or Owner.
+                        </div>
                       </div>
 
                       {/* Live Activity History */}
                       <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] shadow-xs space-y-3">
                         <div className="flex items-center justify-between">
-                          <h4 className="font-bold text-sm">Salon Ledger & Visits</h4>
+                          <h4 className="font-bold text-sm">Salon Ledger &amp; Visits</h4>
                           <span className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
                             Last visit: {currentSalon.last_visited_at ? when(currentSalon.last_visited_at) : "None"}
                           </span>
@@ -1338,25 +1343,56 @@ export default function App() {
                             salonActivity.payments.length === 0 &&
                             salonActivity.orderCards.length === 0) ? (
                           <div className="py-6 text-center text-xs text-[#6b625e] dark:text-[#a59b96]">
-                            No synced visits, payments, or order cards for this salon yet.
+                            No synced visits, verified settlements, or order cards for this salon yet.
                           </div>
                         ) : (
                           <div className="divide-y divide-[#e6dfdb]/60 dark:divide-[#3a3330] text-xs max-h-64 overflow-y-auto">
-                            {salonActivity.payments.map((p) => (
-                              <div key={p.id} className="py-2 flex items-center justify-between gap-2">
-                                <div>
-                                  <div className="font-semibold text-emerald-700 dark:text-emerald-400">
-                                    Cash Payment
+                            {salonActivity.payments.map((p) => {
+                              const isBank = p.method === "bank_transfer" || p.method === "bank";
+                              return (
+                                <div key={p.id} className="py-2 flex items-center justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span
+                                        className={`font-semibold ${
+                                          p.reversed
+                                            ? "text-rose-700 dark:text-rose-400"
+                                            : "text-emerald-700 dark:text-emerald-400"
+                                        }`}
+                                      >
+                                        {isBank ? "Bank-to-Bank Settlement" : "Cash-to-Cash Settlement"}
+                                      </span>
+                                      {p.receiptNumber && (
+                                        <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330]">
+                                          {p.receiptNumber}
+                                        </span>
+                                      )}
+                                      {p.reversed && (
+                                        <span className="text-[10px] font-bold uppercase text-rose-700 dark:text-rose-300">
+                                          Reversed
+                                        </span>
+                                      )}
+                                    </div>
+                                    {(p.bankName || p.bankReference) && (
+                                      <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                                        {[p.bankName, p.bankReference].filter(Boolean).join(" · ")}
+                                      </div>
+                                    )}
+                                    <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                                      {when(p.capturedAt)}
+                                      {p.recordedByName ? ` · Approved by ${p.recordedByName}` : ""}
+                                    </div>
                                   </div>
-                                  <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
-                                    {when(p.capturedAt)}
-                                  </div>
+                                  <span
+                                    className={`font-bold tabular-nums shrink-0 ${
+                                      p.reversed ? "line-through text-rose-600/70" : ""
+                                    }`}
+                                  >
+                                    PKR {p.amount.toLocaleString()}
+                                  </span>
                                 </div>
-                                <span className="font-bold tabular-nums">
-                                  PKR {p.amount.toLocaleString()}
-                                </span>
-                              </div>
-                            ))}
+                              );
+                            })}
                             {salonActivity.orderCards.map((c) => (
                               <div key={c.id} className="py-2 flex items-start justify-between gap-2">
                                 <div className="min-w-0">
@@ -1652,7 +1688,7 @@ export default function App() {
                       ? searchedOrders
                       : searchedOrders.filter((o) => o.status === deliveryFilter);
 
-                  const isManager = user.role === "manager";
+                  const isManager = canManageCatalog(user.role);
                   const visiblePendingOrders = filteredOrders.filter(
                     (o) => o.status === "pending_delivery",
                   );
@@ -2096,19 +2132,25 @@ export default function App() {
                     <button
                       type="button"
                       onClick={async () => {
-                        const id = `tst-pay-${Date.now()}`;
+                        const id = `note-${Date.now()}`;
+                        const targetSalonId = currentSalon?.id || salons[0]?.id || "sal-dha-02";
                         await submit({
                           id,
-                          fn: "rep_record_payment",
-                          args: { p_id: id, p_salon_id: "sal-dha-02", p_amount: 5000 },
-                          label: "Test Payment PKR 5,000",
-                          salonId: "sal-dha-02",
+                          fn: "add_salon_note",
+                          args: {
+                            p_id: id,
+                            p_salon_id: targetSalonId,
+                            p_notes: "Salon owner requested follow-up catalog list.",
+                            p_body: "Salon owner requested follow-up catalog list.",
+                          },
+                          label: "Test Salon Note",
+                          salonId: targetSalonId,
                           capturedAt: new Date().toISOString(),
                         });
                       }}
                       className="px-3 py-1.5 rounded-lg bg-black/5 dark:bg-white/5 font-medium hover:bg-black/10"
                     >
-                      + Enqueue Cash PKR 5k
+                      + Enqueue Salon Note
                     </button>
 
                     <button
@@ -2118,8 +2160,11 @@ export default function App() {
                         await submit({
                           id,
                           fn: "rep_check_in",
-                          args: { p_id: id, p_bag_count: -1, p_fail: true },
-                          label: "Invalid Bag Count (Triggers Refusal)",
+                          args: {
+                            p_id: id,
+                            p_fail: true,
+                          },
+                          label: "Invalid RPC Refusal Test",
                           salonId: null,
                           capturedAt: new Date().toISOString(),
                         });
@@ -2286,90 +2331,6 @@ export default function App() {
 
       {/* ================= MODALS ================= */}
 
-      {/* 1. Check-In Modal */}
-      {showCheckInModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#211d1b] p-5 shadow-xl border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
-            <h3 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
-              Morning Bag Stock Count
-            </h3>
-            <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-              Count physical retail tubes, serums and shampoos in your shoulder bag before starting salon visits.
-            </p>
-            <div>
-              <label htmlFor="checkin-bag-count" className="block text-xs font-semibold mb-1">
-                Total Units Counted:
-              </label>
-              <input
-                id="checkin-bag-count"
-                type="number"
-                value={bagCount}
-                onChange={(e) => setBagCount(Number(e.target.value))}
-                className="w-full p-2.5 text-base font-bold tabular-nums rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
-              />
-            </div>
-            <div className="flex gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setShowCheckInModal(false)}
-                className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => handleCheckIn(bagCount)}
-                className="flex-1 py-2.5 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold"
-              >
-                Confirm Check-In
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 2. Check-Out Modal (Daily Close) */}
-      {showCheckOutModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#211d1b] p-5 shadow-xl border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
-            <h3 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
-              Evening Bag Count & Daily Close
-            </h3>
-            <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-              Count remaining unsold units in bag. Variance against deliveries and sales will be calculated automatically.
-            </p>
-            <div>
-              <label htmlFor="checkout-bag-count" className="block text-xs font-semibold mb-1">
-                Leftover Units Counted:
-              </label>
-              <input
-                id="checkout-bag-count"
-                type="number"
-                value={bagCount}
-                onChange={(e) => setBagCount(Number(e.target.value))}
-                className="w-full p-2.5 text-base font-bold tabular-nums rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
-              />
-            </div>
-            <div className="flex gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setShowCheckOutModal(false)}
-                className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => handleCheckOut(bagCount)}
-                className="flex-1 py-2.5 rounded-xl bg-rose-600 text-white text-xs font-semibold hover:bg-rose-700"
-              >
-                Close Day
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* 3. Log Visit Modal */}
       {showVisitModal && currentSalon && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
@@ -2410,54 +2371,6 @@ export default function App() {
         </div>
       )}
 
-      {/* 4. Payment Modal */}
-      {showPaymentModal && currentSalon && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#211d1b] p-5 shadow-xl border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
-            <h3 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
-              Collect Cash Payment
-            </h3>
-            <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-              Salon: <strong>{currentSalon.name}</strong> (Due: PKR{" "}
-              {currentSalon.outstanding_balance.toLocaleString()})
-            </p>
-            <div>
-              <label htmlFor="cash-amount" className="block text-xs font-semibold mb-1">
-                Cash Amount (PKR):
-              </label>
-              <input
-                id="cash-amount"
-                type="number"
-                min={1}
-                placeholder="e.g. 15000"
-                value={paymentAmount}
-                onChange={(e) => setPaymentAmount(e.target.value)}
-                className="w-full p-2.5 text-base font-bold tabular-nums rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
-              />
-            </div>
-            <p className="text-[11px] text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 p-2.5 rounded-xl">
-              Saved on this phone; official ledger receipt recorded automatically once synced.
-            </p>
-            <div className="flex gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setShowPaymentModal(false)}
-                className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleRecordPayment}
-                className="flex-1 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700"
-              >
-                Accept PKR Cash
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* 5. Order Intake Card Modal */}
       {showCardModal && currentSalon && (() => {
         const activeSelectedSkuId = filteredCardSkus.some((k) => k.id === selectedSkuId)
@@ -2486,16 +2399,30 @@ export default function App() {
             aria-labelledby="order-intake-modal-title"
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
           >
-            <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#211d1b] p-5 shadow-xl border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
-              <h3
-                id="order-intake-modal-title"
-                className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]"
-              >
-                Create Order Intake Card
-              </h3>
-              <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-                For: <strong>{currentSalon.name}</strong>
-              </p>
+            <div className="w-full max-w-md rounded-2xl bg-white dark:bg-[#211d1b] p-5 shadow-xl border border-[#e6dfdb] dark:border-[#3a3330] space-y-3 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <h3
+                    id="order-intake-modal-title"
+                    className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]"
+                  >
+                    Create Order Intake Card
+                  </h3>
+                  <p className="text-xs text-[#6b625e] dark:text-[#a59b96] mt-0.5">
+                    For: <strong>{currentSalon.name}</strong>
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  data-testid="open-catalog-drawer-btn"
+                  onClick={() => setShowCatalogDrawer(true)}
+                  className="px-3 py-1.5 rounded-xl border border-[#7a2e4a]/40 bg-[#7a2e4a]/5 text-[#7a2e4a] dark:text-[#d77a9c] text-xs font-semibold flex items-center gap-1.5 hover:bg-[#7a2e4a]/10 whitespace-nowrap shrink-0"
+                >
+                  <BookOpen className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>Browse Catalog</span>
+                </button>
+              </div>
               <div className="space-y-2">
                 <div>
                   <div className="flex items-center justify-between gap-2 mb-1">
@@ -2517,7 +2444,7 @@ export default function App() {
                     <input
                       id="order-sku-search"
                       type="text"
-                      placeholder="Find by product name or category..."
+                      placeholder="Find Lumex, Mocheqi Musk, volume (e.g. 500ml), or category..."
                       value={skuSearchQuery}
                       onChange={(e) => {
                         const nextQuery = e.target.value;
@@ -2546,35 +2473,88 @@ export default function App() {
                 </div>
 
                 <div>
-                  <label htmlFor="order-sku" className="block text-xs font-semibold mb-1">
-                    Select Product SKU:
-                  </label>
-                  <select
-                    id="order-sku"
-                    value={activeSelectedSkuId}
-                    disabled={filteredCardSkus.length === 0}
-                    onChange={(e) => setSelectedSkuId(e.target.value)}
-                    className="w-full p-2.5 pr-8 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413] focus:outline-none focus:ring-2 focus:ring-[#7a2e4a]/25 disabled:opacity-60"
-                  >
-                    {filteredCardSkus.length === 0 ? (
-                      <option value="">No matching products</option>
-                    ) : (
-                      filteredCardSkus.map((k) => {
-                        const qty = Math.max(0, Number(k.bag_qty ?? 0));
-                        const stockSuffix =
-                          qty === 0
-                            ? "Out of stock"
-                            : qty < DEFAULT_LOW_STOCK_THRESHOLD
-                              ? `${qty} in stock · Low stock`
-                              : `${qty} in stock`;
-                        return (
-                          <option key={k.id} value={k.id}>
-                            {k.name} · {k.category} ({stockSuffix} · PKR {k.price.toLocaleString()})
-                          </option>
-                        );
-                      })
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <span id="order-sku-label" className="block text-xs font-semibold">
+                      Select Product SKU:
+                    </span>
+                    {selectedSku && (
+                      <span className="text-[11px] font-medium text-[#7a2e4a] dark:text-[#d77a9c] truncate max-w-[190px]">
+                        {getSkuBrand(selectedSku)} · {selectedSku.volume_size ?? selectedSku.unit}
+                      </span>
                     )}
-                  </select>
+                  </div>
+
+                  {filteredCardSkus.length > 0 && (
+                    <div
+                      id="order-sku"
+                      role="listbox"
+                      aria-labelledby="order-sku-label"
+                      data-testid="order-sku-listbox"
+                      className="max-h-52 overflow-y-auto rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413] p-1.5 space-y-1.5"
+                    >
+                      {filteredCardSkus.map((k) => {
+                        const qty = Math.max(0, Number(k.bag_qty ?? 0));
+                        const isSelected = k.id === activeSelectedSkuId;
+                        const isOut = qty === 0;
+                        const isLow = qty > 0 && qty < DEFAULT_LOW_STOCK_THRESHOLD;
+                        const brand = getSkuBrand(k);
+                        const volume = k.volume_size ?? k.unit;
+                        return (
+                          <button
+                            key={k.id}
+                            type="button"
+                            role="option"
+                            aria-selected={isSelected}
+                            data-testid={`order-sku-option-${k.id}`}
+                            onClick={() => setSelectedSkuId(k.id)}
+                            className={`w-full text-left p-2 rounded-xl border transition-colors flex items-center gap-2.5 ${
+                              isSelected
+                                ? "border-[#7a2e4a] bg-white dark:bg-[#211d1b] ring-1 ring-[#7a2e4a]/25"
+                                : "border-transparent bg-white/75 dark:bg-[#211d1b]/65 hover:border-[#e6dfdb] dark:hover:border-[#3a3330]"
+                            }`}
+                          >
+                            <ProductThumbnail sku={k} className="w-11 h-11 rounded-lg" />
+
+                            <div className="flex-1 min-w-0">
+                              <div className="font-semibold text-xs text-[#1d1a19] dark:text-[#f2eeec] truncate">
+                                {k.name}
+                              </div>
+                              <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96] truncate">
+                                {brand} · {volume} · {k.category}
+                              </div>
+                              <div className="mt-0.5 flex items-center justify-between gap-2 text-[11px] tabular-nums">
+                                <span
+                                  className={
+                                    isOut
+                                      ? "font-semibold text-rose-700 dark:text-rose-300"
+                                      : isLow
+                                        ? "font-semibold text-amber-700 dark:text-amber-300"
+                                        : "text-[#6b625e] dark:text-[#a59b96]"
+                                  }
+                                >
+                                  {isOut
+                                    ? "Out of stock"
+                                    : isLow
+                                      ? `${qty} in stock · Low stock`
+                                      : `${qty} in stock`}
+                                </span>
+                                <span className="font-bold text-[#7a2e4a] dark:text-[#d77a9c]">
+                                  PKR {k.price.toLocaleString()}
+                                </span>
+                              </div>
+                            </div>
+
+                            {isSelected && (
+                              <Check
+                                className="w-4 h-4 text-[#7a2e4a] dark:text-[#d77a9c] shrink-0"
+                                aria-hidden="true"
+                              />
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                   {filteredCardSkus.length === 0 && (
                     <div
                       data-testid="order-sku-empty"
@@ -2614,7 +2594,7 @@ export default function App() {
                         <span aria-hidden="true"> · </span>
                         <span className="tabular-nums">
                           {stockCheck.isOutOfStock
-                            ? `0 ${stockCheck.unitLabel} in bag (below ${stockCheck.lowStockThreshold}-unit threshold)`
+                            ? `0 ${stockCheck.unitLabel} in stock (below ${stockCheck.lowStockThreshold}-unit threshold)`
                             : `Only ${stockCheck.availableStock} ${stockCheck.unitLabel} left (below ${stockCheck.lowStockThreshold}-unit threshold)`}
                         </span>
                       </div>
@@ -2664,7 +2644,7 @@ export default function App() {
                     <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-700 dark:text-amber-300" />
                     <span>
                       {stockCheck.availableStock === 0
-                        ? "Out of stock in bag inventory. Warehouse fulfillment will be required upon office approval."
+                        ? "Out of stock in warehouse inventory. Backorder fulfillment will be required upon office approval."
                         : `Requested quantity (${cardQty}) exceeds current stock (${stockCheck.availableStock} ${stockCheck.unitLabel} available — short by ${stockCheck.shortfall}).`}
                     </span>
                   </div>
@@ -2741,13 +2721,33 @@ export default function App() {
               <label htmlFor="new-salon-area" className="block text-xs font-semibold mb-1">
                 Area / Karachi Zone:
               </label>
-              <input
-                id="new-salon-area"
-                type="text"
-                value={newSalonArea}
-                onChange={(e) => setNewSalonArea(e.target.value)}
-                className="w-full p-2.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
-              />
+              {areas.length > 0 ? (
+                <select
+                  id="new-salon-area"
+                  value={newSalonAreaId}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    setNewSalonAreaId(nextId);
+                    const found = areas.find((a) => a.id === nextId);
+                    if (found) setNewSalonArea(found.name);
+                  }}
+                  className="w-full p-2.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+                >
+                  {areas.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}{a.territoryName ? ` (${a.territoryName})` : ""}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  id="new-salon-area"
+                  type="text"
+                  value={newSalonArea}
+                  onChange={(e) => setNewSalonArea(e.target.value)}
+                  className="w-full p-2.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+                />
+              )}
             </div>
             <div>
               <label className="block text-xs font-semibold mb-1">Contact Person & Phone:</label>
@@ -2809,6 +2809,31 @@ export default function App() {
         isSubmitting={markingBulkDelivered}
         onCancel={() => setBulkConfirmOrders([])}
         onConfirm={handleConfirmBulkMarkDelivered}
+      />
+
+      {/* Lumex & Mocheqi Musk Product Catalog Browse Drawer (launched from Take Order) */}
+      <ProductCatalogDrawer
+        isOpen={showCatalogDrawer}
+        onClose={() => setShowCatalogDrawer(false)}
+        skus={skus}
+        selectedSkuId={selectedSkuId}
+        onSelectSkuForOrder={(sku) => {
+          setSelectedSkuId(sku.id);
+          setSkuSearchQuery("");
+          setShowCatalogDrawer(false);
+          showToast(`Selected ${sku.name} for Order Intake.`, "ok");
+          requestAnimationFrame(() => {
+            document
+              .querySelector(`[data-testid="order-sku-option-${sku.id}"]`)
+              ?.scrollIntoView({ block: "nearest" });
+          });
+        }}
+        userRole={user.role}
+        onCatalogUpdated={async (savedSku) => {
+          await refreshBootstrap();
+          setSelectedSkuId(savedSku.id);
+        }}
+        showToast={showToast}
       />
 
       {/* Fixed Bottom Navigation Anchor (Field Rep mode) */}

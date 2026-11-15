@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import path from "node:path";
 import type { OutboxFn } from "./src/lib/outbox/types.ts";
+import { canManageCatalog, type CatalogSkuInput } from "./src/lib/catalog.ts";
 import {
   buildGoogleOAuthUrl,
   isSupabaseAuthConfigured,
@@ -44,9 +45,17 @@ async function startServer() {
   });
 
   app.get("/api/auth/config", (_req, res) => {
+    const supabaseUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "").trim();
+    const supabaseAnonKey = (
+      process.env.SUPABASE_ANON_KEY ||
+      process.env.VITE_SUPABASE_ANON_KEY ||
+      ""
+    ).trim();
     res.json({
-      authConfigured: isSupabaseAuthConfigured(),
-      supabaseConfigured: isSupabaseConfigured(),
+      authConfigured: isSupabaseAuthConfigured() || Boolean(supabaseUrl && supabaseAnonKey),
+      supabaseConfigured: isSupabaseConfigured() || Boolean(supabaseUrl && supabaseAnonKey),
+      supabaseUrl,
+      supabaseAnonKey,
     });
   });
 
@@ -125,7 +134,12 @@ async function startServer() {
 
   // Quick test session helper (useful for evaluation & offline testing)
   app.post("/api/auth/demo", (req, res) => {
-    const role: UserRole = req.body?.role === "manager" ? "manager" : "rep";
+    const role: UserRole =
+      req.body?.role === "owner"
+        ? "owner"
+        : req.body?.role === "manager"
+          ? "manager"
+          : "rep";
     const session = issueDemoSession(role);
     res.json(session);
   });
@@ -277,24 +291,87 @@ async function startServer() {
           res.status(400).json({ error: "Bulk decision must be 'approve' or 'reject'." });
           return;
         }
+      } else if (action.action === "record_office_payment") {
+        if (!canManageCatalog(req.user?.role)) {
+          res.status(403).json({
+            error: "Only an Owner or Office Manager can record and mark off-app payments as paid.",
+          });
+          return;
+        }
+        if (typeof action.salonId !== "string" || !action.salonId.trim()) {
+          res.status(400).json({ error: "Please select a salon." });
+          return;
+        }
+      } else if (action.action === "reverse_office_payment") {
+        if (!canManageCatalog(req.user?.role)) {
+          res.status(403).json({
+            error: "Only an Owner or Office Manager can reverse recorded payments.",
+          });
+          return;
+        }
+        if (typeof action.paymentId !== "string" || !action.paymentId.trim()) {
+          res.status(400).json({ error: "Missing payment ID for reversal." });
+          return;
+        }
       } else if (typeof action.id !== "string") {
         res.status(400).json({ error: "Invalid approval payload." });
         return;
       }
       if (
         (action.action === "mark_delivery_delivered" || action.action === "mark_deliveries_delivered") &&
-        req.user?.role !== "manager"
+        !canManageCatalog(req.user?.role)
       ) {
         res.status(403).json({
           error: "Only an Owner or Office Manager can mark delivery orders as delivered directly.",
         });
         return;
       }
-      const outcome = await repo.handleManagerApproval(action);
+      const outcome = await repo.handleManagerApproval(action, req.user);
       res.json(outcome);
     } catch (err) {
       const status = err instanceof RpcError ? err.status : 400;
       res.status(status).json({ error: err instanceof Error ? err.message : "Approval failed." });
+    }
+  });
+
+  // Catalog SKU Management (Owner & Office Manager Exclusive)
+  app.post("/api/catalog/skus", requireAuth, async (req: AuthenticatedRequest, res) => {
+    if (!canManageCatalog(req.user?.role)) {
+      res.status(403).json({
+        error: "Only Owner and Office Manager can add or edit Lumex, Mocheqi Musk, or catalog SKUs.",
+      });
+      return;
+    }
+    try {
+      const created = await repo.upsertCatalogSku(req.body as CatalogSkuInput);
+      res.status(201).json({
+        ok: true,
+        sku: created,
+        message: `${created.name} added to catalog & Order Intake stock.`,
+      });
+    } catch (err) {
+      const status = err instanceof RpcError ? err.status : 400;
+      res.status(status).json({ error: err instanceof Error ? err.message : "Could not add product SKU." });
+    }
+  });
+
+  app.patch("/api/catalog/skus/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
+    if (!canManageCatalog(req.user?.role)) {
+      res.status(403).json({
+        error: "Only Owner and Office Manager can edit or update catalog SKUs.",
+      });
+      return;
+    }
+    try {
+      const updated = await repo.upsertCatalogSku(req.body as CatalogSkuInput, req.params.id);
+      res.json({
+        ok: true,
+        sku: updated,
+        message: `${updated.name} updated across catalog & Order Intake stock.`,
+      });
+    } catch (err) {
+      const status = err instanceof RpcError ? err.status : 400;
+      res.status(status).json({ error: err instanceof Error ? err.message : "Could not update product SKU." });
     }
   });
 

@@ -6,7 +6,17 @@ export function filterOrderSkus(skus: readonly SKU[], rawQuery: string): SKU[] {
 
   const tokens = normalized.split(/\s+/).filter(Boolean);
   return skus.filter((sku) => {
-    const haystack = `${sku.name} ${sku.category} ${sku.sku_code}`.toLowerCase();
+    const haystack = [
+      sku.name,
+      sku.category,
+      sku.sku_code,
+      sku.brand ?? "",
+      sku.product_type ?? "",
+      sku.volume_size ?? "",
+      sku.recommended_use ?? "",
+    ]
+      .join(" ")
+      .toLowerCase();
     return tokens.every((token) => haystack.includes(token));
   });
 }

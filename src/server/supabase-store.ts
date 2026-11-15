@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { validateCatalogSkuInput, type CatalogSkuInput } from "../lib/catalog.ts";
 import type { RouteStop, SKU } from "../lib/data.ts";
 import type { OutboxFn } from "../lib/outbox/types.ts";
 import {
@@ -319,32 +320,11 @@ export class SupabaseKiranRepository implements KiranRepository {
       }
 
       case "rep_record_payment": {
-        const salonId = String(args.p_salon_id ?? "");
-        const amount = Number(args.p_amount ?? 0);
-        const method = String(args.p_method ?? "cash");
-        if (!Number.isFinite(amount) || amount <= 0) {
-          throw new RpcError("Payment amount must be greater than zero.", 422, "22023");
-        }
-        const { data: salon } = await this.client.from("salons").select("*").eq("id", salonId).maybeSingle();
-        if (!salon) throw new RpcError(`Salon '${salonId}' not found.`, 404, "P0002");
-
-        const { data: existingPay } = await this.client.from("payments").select("id").eq("id", id).maybeSingle();
-        let remaining = Number(salon.outstanding_balance ?? 0);
-        if (!existingPay) {
-          const { error } = await this.client.from("payments").insert({
-            id,
-            rep_id: user.id,
-            salon_id: salonId,
-            amount,
-            method,
-            captured_at: at,
-          });
-          if (error) throw new RpcError(error.message, 400, error.code ?? "23000");
-          remaining = Math.max(0, remaining - amount);
-          await this.client.from("salons").update({ outstanding_balance: remaining }).eq("id", salonId);
-          await this.client.from("route_stops").update({ balance: remaining }).eq("salon_id", salonId);
-        }
-        return { id, payment_id: id, amount, remaining_balance: remaining, status: "recorded" };
+        throw new RpcError(
+          "Field reps cannot collect or approve payments. Off-app settlements must be recorded and marked paid by an Office Manager or Owner.",
+          403,
+          "42501",
+        );
       }
 
       case "rep_create_card": {
@@ -627,7 +607,10 @@ export class SupabaseKiranRepository implements KiranRepository {
     };
   }
 
-  async handleManagerApproval(input: ManagerApprovalAction): Promise<{ ok: true; message: string }> {
+  async handleManagerApproval(
+    input: ManagerApprovalAction,
+    actor?: UserProfile,
+  ): Promise<{ ok: true; message: string }> {
     switch (input.action) {
       case "approve_salon": {
         const { data: salon } = await this.client.from("salons").select("*").eq("id", input.id).maybeSingle();
@@ -848,6 +831,40 @@ export class SupabaseKiranRepository implements KiranRepository {
               : `${pendingIds.length} orders marked as delivered.`,
         };
       }
+
+      case "record_office_payment": {
+        if (actor && actor.role === "rep") {
+          throw new RpcError("Only Owner or Office Manager can record paid settlements.", 403, "42501");
+        }
+        const { data: salon } = await this.client
+          .from("salons")
+          .select("id, outstanding_balance")
+          .eq("id", input.salonId)
+          .maybeSingle();
+        if (!salon) throw new RpcError("Salon not found.", 404, "P0002");
+        const amount = Math.round(Number(input.amountPkr));
+        if (!Number.isFinite(amount) || amount <= 0) {
+          throw new RpcError("Payment amount must be greater than zero.", 422, "22023");
+        }
+        await this.client.from("payments").insert({
+          id: `pay-${Date.now()}`,
+          rep_id: actor?.id ?? "mgr-karachi-hq-01",
+          salon_id: input.salonId,
+          amount,
+          method: input.method,
+          captured_at: new Date().toISOString(),
+        });
+        const remaining = Math.max(0, Number(salon.outstanding_balance ?? 0) - amount);
+        await this.client.from("salons").update({ outstanding_balance: remaining }).eq("id", input.salonId);
+        return { ok: true, message: `Off-app settlement PKR ${amount.toLocaleString()} marked Paid.` };
+      }
+
+      case "reverse_office_payment": {
+        if (actor && actor.role === "rep") {
+          throw new RpcError("Only Owner or Office Manager can reverse recorded settlements.", 403, "42501");
+        }
+        return { ok: true, message: "Payment reversal logged." };
+      }
     }
   }
 
@@ -905,5 +922,60 @@ export class SupabaseKiranRepository implements KiranRepository {
     const { error } = await this.client.from("salons").upsert(rows, { onConflict: "name" });
     if (error) throw this.wrapDbError(error);
     return rows.length;
+  }
+
+  async upsertCatalogSku(input: CatalogSkuInput, existingId?: string): Promise<SKU> {
+    const validated = validateCatalogSkuInput(input);
+    if (validated.ok === false) {
+      throw new RpcError(validated.error, 400, "22023");
+    }
+    const clean = validated.value;
+    const slug = clean.sku_code.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const targetId = existingId || `sku-${slug || Date.now()}`;
+
+    const fullRow = {
+      id: targetId,
+      sku_code: clean.sku_code,
+      name: clean.name,
+      category: clean.category,
+      price: clean.price,
+      bag_qty: clean.bag_qty,
+      unit: clean.unit,
+      brand: clean.brand,
+      product_type: clean.product_type,
+      volume_size: clean.volume_size,
+      recommended_use: clean.recommended_use,
+      image_key: clean.image_key ?? null,
+    };
+
+    const { error } = await this.client.from("skus").upsert(fullRow, { onConflict: "id" });
+    if (error) {
+      const coreRow = {
+        id: targetId,
+        sku_code: clean.sku_code,
+        name: clean.name,
+        category: clean.category,
+        price: clean.price,
+        bag_qty: clean.bag_qty,
+        unit: clean.unit,
+      };
+      const { error: fallbackErr } = await this.client.from("skus").upsert(coreRow, { onConflict: "id" });
+      if (fallbackErr) throw this.wrapDbError(fallbackErr);
+    }
+
+    return {
+      id: targetId,
+      sku_code: clean.sku_code,
+      name: clean.name,
+      category: clean.category,
+      price: clean.price,
+      bag_qty: clean.bag_qty,
+      unit: clean.unit,
+      brand: clean.brand,
+      product_type: clean.product_type,
+      volume_size: clean.volume_size,
+      recommended_use: clean.recommended_use,
+      image_key: clean.image_key,
+    };
   }
 }

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import {
   AlertTriangle,
   ArrowUpDown,
+  Building2,
   Check,
   ClipboardCheck,
   Coins,
@@ -9,13 +10,18 @@ import {
   FileSpreadsheet,
   Layers,
   Package,
+  Pencil,
+  Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   ShoppingBag,
   Store,
   X,
 } from "lucide-react";
 import { fetchManagerOverview, resendDeliveryNotification, submitManagerApproval } from "../lib/api";
+import { canManageCatalog, getSkuBrand } from "../lib/catalog";
+import type { SKU } from "../lib/data";
 import { downloadDeliveryOrdersCsv } from "../lib/csv";
 import { computeManagerQuickSnapshot } from "../lib/manager-snapshot";
 import {
@@ -24,11 +30,14 @@ import {
 } from "../lib/order-card-bulk";
 import { SALON_SORT_OPTIONS, sortSalons, type SalonSortKey } from "../lib/salon-sort";
 import { when } from "../lib/time";
+import { ProductCatalogDrawer } from "./product-catalog-drawer";
+import { ProductThumbnail } from "./product-thumbnail";
 import type {
   DeliveryOrderFull,
   ManagerApprovalAction,
   ManagerOverviewPayload,
   OrderCardRecord,
+  PaymentRecord,
   UserRole,
 } from "../server/types";
 import {
@@ -80,6 +89,32 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
     decision: OrderCardBulkDecision;
   } | null>(null);
   const [processingBulkCards, setProcessingBulkCards] = useState(false);
+  const [catalogModalState, setCatalogModalState] = useState<{
+    open: boolean;
+    editSku: SKU | null;
+    createMode: boolean;
+  }>({ open: false, editSku: null, createMode: false });
+
+  // Manager/Owner Off-App Paid Settlement & Audit Reversal modals
+  const [paymentModal, setPaymentModal] = useState<{
+    open: boolean;
+    salonId: string;
+    method: "bank_transfer" | "cash";
+    amountPkr: string;
+    bankName: string;
+    bankReference: string;
+  }>({
+    open: false,
+    salonId: "",
+    method: "bank_transfer",
+    amountPkr: "",
+    bankName: "",
+    bankReference: "",
+  });
+  const [submittingPayment, setSubmittingPayment] = useState(false);
+  const [reverseModalPayment, setReverseModalPayment] = useState<PaymentRecord | null>(null);
+  const [reverseReason, setReverseReason] = useState("");
+  const [submittingReversal, setSubmittingReversal] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -198,6 +233,90 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
     }
   };
 
+  const openRecordPaymentModal = (salonId?: string, suggestedBalance?: number) => {
+    const defaultSalon = salonId || data?.salons[0]?.id || "";
+    const suggested =
+      suggestedBalance && suggestedBalance > 0
+        ? String(suggestedBalance)
+        : "";
+    setPaymentModal({
+      open: true,
+      salonId: defaultSalon,
+      method: "bank_transfer",
+      amountPkr: suggested,
+      bankName: "",
+      bankReference: "",
+    });
+  };
+
+  const handleSubmitOfficePayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const amountPkr = Math.round(Number(paymentModal.amountPkr));
+    if (!paymentModal.salonId || !Number.isFinite(amountPkr) || amountPkr <= 0) {
+      showToast("Enter a valid positive PKR settlement amount.", "warn");
+      return;
+    }
+    if (paymentModal.method === "bank_transfer") {
+      if (paymentModal.bankName.trim().length < 2) {
+        showToast("Enter the Bank Name (at least 2 characters).", "warn");
+        return;
+      }
+      if (paymentModal.bankReference.trim().length < 3) {
+        showToast("Enter the IBFT / Bank Transfer Reference (at least 3 characters).", "warn");
+        return;
+      }
+    }
+
+    setSubmittingPayment(true);
+    try {
+      const res = await submitManagerApproval({
+        action: "record_office_payment",
+        salonId: paymentModal.salonId,
+        method: paymentModal.method,
+        amountPkr,
+        bankName: paymentModal.method === "bank_transfer" ? paymentModal.bankName.trim() : undefined,
+        bankReference:
+          paymentModal.method === "bank_transfer" ? paymentModal.bankReference.trim() : undefined,
+      });
+      setPaymentModal((prev) => ({ ...prev, open: false }));
+      showToast(res.message, "ok");
+      await load();
+      onApprovedChange?.();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not record off-app settlement.", "warn");
+    } finally {
+      setSubmittingPayment(false);
+    }
+  };
+
+  const handleConfirmReversePayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!reverseModalPayment) return;
+    const reason = reverseReason.trim();
+    if (reason.length < 5 || reason.length > 300) {
+      showToast("Audit reversal reason must be between 5 and 300 characters.", "warn");
+      return;
+    }
+
+    setSubmittingReversal(true);
+    try {
+      const res = await submitManagerApproval({
+        action: "reverse_office_payment",
+        paymentId: reverseModalPayment.id,
+        reason,
+      });
+      setReverseModalPayment(null);
+      setReverseReason("");
+      showToast(res.message, "ok");
+      await load();
+      onApprovedChange?.();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not reverse payment.", "warn");
+    } finally {
+      setSubmittingReversal(false);
+    }
+  };
+
   if (loading && !data) {
     return (
       <div className="space-y-4">
@@ -260,7 +379,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
             Office Manager Operations
           </h2>
           <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
-            Approvals, Karachi salon receivables, khsalon.com orders & stock variance
+            Approvals, Karachi salon receivables, khsalon.com orders &amp; catalog
           </p>
         </div>
 
@@ -368,12 +487,12 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
         </div>
 
         <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330]">
-          <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">Monthly Cash Collected</div>
+          <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">Monthly Off-App Collections</div>
           <div className="text-2xl font-bold tabular-nums mt-1 text-emerald-700 dark:text-emerald-400">
             PKR {data.stats.cashCollectedPkr.toLocaleString()}
           </div>
           <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96] mt-0.5">
-            {data.recentPayments.length} recorded cash receipts
+            {data.recentPayments.filter((p) => !p.reversed).length} verified off-app receipts
           </div>
         </div>
 
@@ -655,12 +774,12 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
             );
           })()}
 
-          {/* Rep Shift Bag Variance */}
+          {/* Rep Daily Check-Ins */}
           <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] space-y-3 lg:col-span-2">
             <div className="flex items-center justify-between">
               <h3 className="font-bold text-sm flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-amber-600" />
-                <span>Rep Shift Check-In & Bag Stock Variance</span>
+                <ClipboardCheck className="w-4 h-4 text-[#7a2e4a] dark:text-[#d77a9c]" />
+                <span>Rep Daily Check-Ins</span>
               </h3>
               <span className="text-xs text-[#6b625e] dark:text-[#a59b96] tabular-nums">
                 {data.shifts.length} recorded shifts
@@ -669,7 +788,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
 
             {data.shifts.length === 0 ? (
               <div className="py-6 text-center text-xs text-[#6b625e] dark:text-[#a59b96]">
-                No rep shift check-ins recorded yet. Check in from the Today tab to generate a shift audit row.
+                No rep check-ins recorded yet. Check in from the Today tab to generate a shift log.
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -677,39 +796,22 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                   <thead>
                     <tr className="border-b border-[#e6dfdb] dark:border-[#3a3330] text-[#6b625e] dark:text-[#a59b96]">
                       <th className="py-2 pr-3 font-semibold">Rep</th>
+                      <th className="py-2 px-3 font-semibold">Checked In</th>
                       <th className="py-2 px-3 font-semibold">Status</th>
-                      <th className="py-2 px-3 font-semibold text-right">Opening</th>
-                      <th className="py-2 px-3 font-semibold text-right">Expected</th>
-                      <th className="py-2 px-3 font-semibold text-right">Closing</th>
-                      <th className="py-2 px-3 font-semibold text-right">Variance</th>
+                      <th className="py-2 px-3 font-semibold">Closed At</th>
                       <th className="py-2 pl-3 font-semibold text-right">Approval</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#e6dfdb]/60 dark:divide-[#3a3330]">
                     {data.shifts.map((shift) => (
                       <tr key={shift.id}>
-                        <td className="py-2.5 pr-3">
-                          <div className="font-semibold">{shift.repName}</div>
-                          <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
-                            {when(shift.openedAt)}
-                          </div>
+                        <td className="py-2.5 pr-3 font-semibold">{shift.repName}</td>
+                        <td className="py-2.5 px-3 text-[#6b625e] dark:text-[#a59b96] tabular-nums">
+                          {when(shift.openedAt)}
                         </td>
                         <td className="py-2.5 px-3 capitalize">{shift.status}</td>
-                        <td className="py-2.5 px-3 text-right tabular-nums">{shift.openingBagCount}</td>
-                        <td className="py-2.5 px-3 text-right tabular-nums">
-                          {shift.expectedBagCount ?? "—"}
-                        </td>
-                        <td className="py-2.5 px-3 text-right tabular-nums">
-                          {shift.closingBagCount ?? "—"}
-                        </td>
-                        <td
-                          className={`py-2.5 px-3 text-right font-bold tabular-nums ${
-                            shift.varianceUnits === 0
-                              ? "text-emerald-700 dark:text-emerald-400"
-                              : "text-rose-600 dark:text-rose-400"
-                          }`}
-                        >
-                          {shift.varianceUnits > 0 ? `+${shift.varianceUnits}` : shift.varianceUnits}
+                        <td className="py-2.5 px-3 text-[#6b625e] dark:text-[#a59b96] tabular-nums">
+                          {shift.closedAt ? when(shift.closedAt) : "—"}
                         </td>
                         <td className="py-2.5 pl-3 text-right">
                           {shift.approvalStatus === "approved" ? (
@@ -752,9 +854,9 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="lg:col-span-2 p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="font-bold text-sm">Salon Credit & Receivables</h3>
+              <h3 className="font-bold text-sm">Salon Credit &amp; Receivables</h3>
               <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-                <div className="relative flex-1 sm:w-48">
+                <div className="relative flex-1 sm:w-44">
                   <Search className="w-3.5 h-3.5 absolute left-3 top-3 text-[#6b625e]" />
                   <input
                     type="text"
@@ -779,6 +881,17 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                     ))}
                   </select>
                 </div>
+                {canManageCatalog(userRole) && (
+                  <button
+                    type="button"
+                    data-testid="open-record-payment-btn"
+                    onClick={() => openRecordPaymentModal()}
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold hover:bg-[#66243d] flex items-center gap-1.5 shrink-0 whitespace-nowrap"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Record Paid Settlement</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setShowBulkImport(true)}
@@ -797,7 +910,10 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                     <th className="py-2 pr-3 font-semibold">Salon</th>
                     <th className="py-2 px-3 font-semibold">Stage</th>
                     <th className="py-2 px-3 font-semibold text-right">Balance Due</th>
-                    <th className="py-2 pl-3 font-semibold text-right">Credit Limit</th>
+                    <th className="py-2 px-3 font-semibold text-right">Credit Limit</th>
+                    {canManageCatalog(userRole) && (
+                      <th className="py-2 pl-3 font-semibold text-right">Settlement</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#e6dfdb]/60 dark:divide-[#3a3330]">
@@ -819,9 +935,20 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                       >
                         PKR {s.outstanding_balance.toLocaleString()}
                       </td>
-                      <td className="py-2.5 pl-3 text-right tabular-nums text-[#6b625e] dark:text-[#a59b96]">
+                      <td className="py-2.5 px-3 text-right tabular-nums text-[#6b625e] dark:text-[#a59b96]">
                         PKR {s.credit_limit.toLocaleString()}
                       </td>
+                      {canManageCatalog(userRole) && (
+                        <td className="py-2.5 pl-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() => openRecordPaymentModal(s.id, s.outstanding_balance)}
+                            className="px-2.5 py-1 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] hover:border-[#7a2e4a] text-[11px] font-semibold text-[#7a2e4a] dark:text-[#d77a9c] whitespace-nowrap"
+                          >
+                            Record Paid
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -830,26 +957,81 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
           </div>
 
           <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
-            <h3 className="font-bold text-sm">Recent Cash Receipts</h3>
+            <div>
+              <h3 className="font-bold text-sm">Verified Off-App Settlements</h3>
+              <p className="text-[11px] text-[#6b625e] dark:text-[#a59b96] mt-0.5">
+                Bank-to-Bank &amp; Cash-to-Cash notes approved by Office Manager or Owner (no in-app payments).
+              </p>
+            </div>
             {data.recentPayments.length === 0 ? (
               <div className="py-6 text-center text-xs text-[#6b625e] dark:text-[#a59b96]">
-                No cash payments recorded yet.
+                No off-app settlements recorded yet.
               </div>
             ) : (
               <div className="divide-y divide-[#e6dfdb]/60 dark:divide-[#3a3330] text-xs">
-                {data.recentPayments.map((pay) => (
-                  <div key={pay.id} className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="font-semibold truncate">{pay.salonName || pay.salonId}</div>
-                      <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
-                        {when(pay.capturedAt)} · {pay.method}
+                {data.recentPayments.map((pay) => {
+                  const isBank = pay.method === "bank_transfer" || pay.method === "bank";
+                  return (
+                    <div key={pay.id} className="py-3 first:pt-0 last:pb-0 space-y-1.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-semibold truncate">{pay.salonName || pay.salonId}</span>
+                            {pay.receiptNumber && (
+                              <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-[#6b625e] dark:text-[#a59b96]">
+                                {pay.receiptNumber}
+                              </span>
+                            )}
+                            {pay.reversed && (
+                              <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300">
+                                Reversed
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96] mt-0.5">
+                            {isBank ? "Bank-to-Bank" : "Cash-to-Cash"}
+                            {pay.bankName ? ` · ${pay.bankName}` : ""}
+                            {pay.bankReference ? ` (${pay.bankReference})` : ""}
+                          </div>
+                          <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                            {when(pay.capturedAt)}
+                            {pay.recordedByName ? ` · Approved by ${pay.recordedByName}` : ""}
+                          </div>
+                          {pay.reversed && pay.reversalReason && (
+                            <div className="text-[11px] text-rose-700 dark:text-rose-300 mt-0.5">
+                              Reversal note: {pay.reversalReason}
+                            </div>
+                          )}
+                        </div>
+                        <div className="text-right shrink-0 space-y-1">
+                          <div
+                            className={`font-bold tabular-nums ${
+                              pay.reversed
+                                ? "line-through text-rose-600/70 dark:text-rose-400/70"
+                                : "text-emerald-700 dark:text-emerald-400"
+                            }`}
+                          >
+                            +PKR {pay.amount.toLocaleString()}
+                          </div>
+                          {!pay.reversed && pay.mayReverse !== false && canManageCatalog(userRole) && (
+                            <button
+                              type="button"
+                              data-testid={`reverse-payment-btn-${pay.id}`}
+                              onClick={() => {
+                                setReverseModalPayment(pay);
+                                setReverseReason("");
+                              }}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-[#e6dfdb] dark:border-[#3a3330] text-[10px] font-semibold text-rose-600 hover:border-rose-400"
+                            >
+                              <RotateCcw className="w-2.5 h-2.5" />
+                              <span>Reverse</span>
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
-                    <div className="font-bold text-emerald-700 dark:text-emerald-400 tabular-nums shrink-0">
-                      +PKR {pay.amount.toLocaleString()}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -965,7 +1147,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                   ? searchedDeliveries
                   : searchedDeliveries.filter((o) => o.status === deliveryFilter);
 
-              const isManager = userRole === "manager";
+              const isManager = canManageCatalog(userRole);
               const visiblePendingIds = filteredDeliveries
                 .filter((o) => o.status === "pending_delivery")
                 .map((o) => o.id);
@@ -1235,33 +1417,92 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
       {section === "inventory" && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] space-y-3">
-            <h3 className="font-bold text-sm">Rep Bag SKU Inventory</h3>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="font-bold text-sm">Warehouse &amp; Catalog SKU Inventory</h3>
+                <p className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                  Lumex, Mocheqi Musk, and distribution stock synced to Take Order.
+                </p>
+              </div>
+              {canManageCatalog(userRole) && (
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    data-testid="manager-browse-catalog-btn"
+                    onClick={() =>
+                      setCatalogModalState({ open: true, editSku: null, createMode: false })
+                    }
+                    className="px-2.5 py-1.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold hover:border-[#7a2e4a] whitespace-nowrap"
+                  >
+                    Browse Catalog
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="manager-add-product-btn"
+                    onClick={() =>
+                      setCatalogModalState({ open: true, editSku: null, createMode: true })
+                    }
+                    className="px-2.5 py-1.5 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold flex items-center gap-1 whitespace-nowrap"
+                  >
+                    <Plus className="w-3.5 h-3.5" aria-hidden="true" />
+                    <span>Add Product</span>
+                  </button>
+                </div>
+              )}
+            </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
                   <tr className="border-b border-[#e6dfdb] dark:border-[#3a3330] text-[#6b625e] dark:text-[#a59b96]">
-                    <th className="py-2 pr-3 font-semibold">SKU</th>
-                    <th className="py-2 px-3 font-semibold">Category</th>
+                    <th className="py-2 pr-3 font-semibold">Product</th>
+                    <th className="py-2 px-3 font-semibold">Line &amp; Volume</th>
                     <th className="py-2 px-3 font-semibold text-right">Price</th>
-                    <th className="py-2 pl-3 font-semibold text-right">Bag Qty</th>
+                    <th className="py-2 pl-3 font-semibold text-right">Stock Qty</th>
+                    {canManageCatalog(userRole) && (
+                      <th className="py-2 pl-3 font-semibold text-right">Edit</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#e6dfdb]/60 dark:divide-[#3a3330]">
                   {data.skus.map((sku) => (
                     <tr key={sku.id}>
                       <td className="py-2.5 pr-3">
-                        <div className="font-semibold">{sku.name}</div>
-                        <div className="font-mono text-[11px] text-[#6b625e] dark:text-[#a59b96]">
-                          {sku.sku_code}
+                        <div className="flex items-center gap-2.5">
+                          <ProductThumbnail sku={sku} className="w-10 h-10 rounded-lg" />
+                          <div className="min-w-0">
+                            <div className="font-semibold leading-snug">{sku.name}</div>
+                            <div className="font-mono text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                              {sku.sku_code} · {sku.category}
+                            </div>
+                          </div>
                         </div>
                       </td>
-                      <td className="py-2.5 px-3">{sku.category}</td>
-                      <td className="py-2.5 px-3 text-right tabular-nums">
+                      <td className="py-2.5 px-3">
+                        <div className="font-medium">{getSkuBrand(sku)}</div>
+                        <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                          {sku.volume_size ?? sku.unit}
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 text-right tabular-nums whitespace-nowrap">
                         PKR {sku.price.toLocaleString()}
                       </td>
-                      <td className="py-2.5 pl-3 text-right font-bold tabular-nums">
+                      <td className="py-2.5 pl-3 text-right font-bold tabular-nums whitespace-nowrap">
                         {sku.bag_qty} {sku.unit}s
                       </td>
+                      {canManageCatalog(userRole) && (
+                        <td className="py-2.5 pl-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCatalogModalState({ open: true, editSku: sku, createMode: false })
+                            }
+                            className="p-1.5 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] text-[#6b625e] hover:text-[#7a2e4a] hover:border-[#7a2e4a]"
+                            aria-label={`Edit ${sku.name}`}
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -1331,6 +1572,251 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
         onCancel={() => setBulkCardConfirm(null)}
         onConfirm={handleConfirmBulkOrderCards}
       />
+
+      <ProductCatalogDrawer
+        isOpen={catalogModalState.open}
+        onClose={() => setCatalogModalState({ open: false, editSku: null, createMode: false })}
+        skus={data.skus}
+        userRole={userRole}
+        initialEditSku={catalogModalState.editSku}
+        startInCreateMode={catalogModalState.createMode}
+        onCatalogUpdated={async () => {
+          await load();
+          onApprovedChange?.();
+        }}
+        showToast={showToast}
+      />
+
+      {/* Off-App Paid Settlement Modal (Manager / Owner Only) */}
+      {paymentModal.open && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="office-payment-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+        >
+          <form
+            onSubmit={handleSubmitOfficePayment}
+            className="w-full max-w-md rounded-2xl bg-white dark:bg-[#211d1b] p-5 shadow-xl border border-[#e6dfdb] dark:border-[#3a3330] space-y-3.5"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h3
+                  id="office-payment-modal-title"
+                  className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]"
+                >
+                  Record Off-App Paid Settlement
+                </h3>
+                <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+                  Manager / Owner approval record for off-app Bank-to-Bank or Cash-to-Cash payments.
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close modal"
+                onClick={() => setPaymentModal((prev) => ({ ...prev, open: false }))}
+                className="p-1 text-[#6b625e]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div>
+              <label htmlFor="office-payment-salon" className="block text-xs font-semibold mb-1">
+                Salon Account
+              </label>
+              <select
+                id="office-payment-salon"
+                value={paymentModal.salonId}
+                onChange={(e) =>
+                  setPaymentModal((prev) => ({ ...prev, salonId: e.target.value }))
+                }
+                className="w-full p-2.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+              >
+                {data.salons.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} (Due: PKR {s.outstanding_balance.toLocaleString()})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <span className="block text-xs font-semibold mb-1">Off-App Settlement Method</span>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPaymentModal((prev) => ({ ...prev, method: "bank_transfer" }))
+                  }
+                  className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 ${
+                    paymentModal.method === "bank_transfer"
+                      ? "border-[#7a2e4a] bg-[#7a2e4a]/10 text-[#7a2e4a] dark:text-[#d77a9c]"
+                      : "border-[#e6dfdb] dark:border-[#3a3330]"
+                  }`}
+                >
+                  <Building2 className="w-3.5 h-3.5" />
+                  <span>Bank-to-Bank</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPaymentModal((prev) => ({ ...prev, method: "cash" }))}
+                  className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 ${
+                    paymentModal.method === "cash"
+                      ? "border-[#7a2e4a] bg-[#7a2e4a]/10 text-[#7a2e4a] dark:text-[#d77a9c]"
+                      : "border-[#e6dfdb] dark:border-[#3a3330]"
+                  }`}
+                >
+                  <Coins className="w-3.5 h-3.5" />
+                  <span>Cash-to-Cash</span>
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label htmlFor="office-payment-amount" className="block text-xs font-semibold mb-1">
+                Verified Paid Amount (PKR)
+              </label>
+              <input
+                id="office-payment-amount"
+                type="number"
+                min={1}
+                required
+                placeholder="e.g. 15000"
+                value={paymentModal.amountPkr}
+                onChange={(e) =>
+                  setPaymentModal((prev) => ({ ...prev, amountPkr: e.target.value }))
+                }
+                className="w-full p-2.5 text-sm font-bold tabular-nums rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+              />
+            </div>
+
+            {paymentModal.method === "bank_transfer" && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label htmlFor="office-bank-name" className="block text-xs font-semibold mb-1">
+                    Bank Name
+                  </label>
+                  <input
+                    id="office-bank-name"
+                    type="text"
+                    required
+                    minLength={2}
+                    maxLength={60}
+                    placeholder="e.g. Meezan Bank"
+                    value={paymentModal.bankName}
+                    onChange={(e) =>
+                      setPaymentModal((prev) => ({ ...prev, bankName: e.target.value }))
+                    }
+                    className="w-full p-2.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="office-bank-ref" className="block text-xs font-semibold mb-1">
+                    IBFT / Reference #
+                  </label>
+                  <input
+                    id="office-bank-ref"
+                    type="text"
+                    required
+                    minLength={3}
+                    maxLength={60}
+                    placeholder="e.g. IBFT-884201"
+                    value={paymentModal.bankReference}
+                    onChange={(e) =>
+                      setPaymentModal((prev) => ({ ...prev, bankReference: e.target.value }))
+                    }
+                    className="w-full p-2.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 text-[11px] text-amber-900 dark:text-amber-200">
+              No payment is processed through this app. This logs a verified Bank-to-Bank or Cash-to-Cash settlement as paid in the immutable ledger.
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setPaymentModal((prev) => ({ ...prev, open: false }))}
+                className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={submittingPayment}
+                className="flex-1 py-2.5 rounded-xl bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800 disabled:opacity-50"
+              >
+                {submittingPayment ? "Recording..." : "Mark Settlement Paid"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Audit Payment Reversal Modal (Manager / Owner) */}
+      {reverseModalPayment && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="reverse-payment-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+        >
+          <form
+            onSubmit={handleConfirmReversePayment}
+            className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#211d1b] p-5 shadow-xl border border-[#e6dfdb] dark:border-[#3a3330] space-y-3"
+          >
+            <h3
+              id="reverse-payment-modal-title"
+              className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]"
+            >
+              Audit Reversal: {reverseModalPayment.receiptNumber || reverseModalPayment.id}
+            </h3>
+            <p className="text-xs text-[#6b625e] dark:text-[#a59b96]">
+              Reverse{" "}
+              <strong>PKR {reverseModalPayment.amount.toLocaleString()}</strong> for{" "}
+              <strong>{reverseModalPayment.salonName || reverseModalPayment.salonId}</strong>.
+            </p>
+            <div>
+              <label htmlFor="reverse-reason" className="block text-xs font-semibold mb-1">
+                Audit Reason (5–300 characters):
+              </label>
+              <textarea
+                id="reverse-reason"
+                rows={3}
+                required
+                minLength={5}
+                maxLength={300}
+                placeholder="e.g. Duplicate bank reference entered or cheque bounced"
+                value={reverseReason}
+                onChange={(e) => setReverseReason(e.target.value)}
+                className="w-full p-2.5 text-xs rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
+              />
+            </div>
+            <p className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+              Appends an audit reversal record and restores the salon&apos;s outstanding receivable balance.
+            </p>
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setReverseModalPayment(null)}
+                className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={submittingReversal || reverseReason.trim().length < 5}
+                className="flex-1 py-2.5 rounded-xl bg-rose-700 text-white text-xs font-semibold hover:bg-rose-800 disabled:opacity-50"
+              >
+                {submittingReversal ? "Reversing..." : "Confirm Audit Reversal"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 };

@@ -32,6 +32,32 @@ import {
   optimizeRouteStops,
 } from "../lib/route-optimizer.ts";
 import { filterOrderSkus } from "../lib/order-sku-search.ts";
+import {
+  canManageCatalog,
+  filterCatalogSkus,
+  validateCatalogSkuInput,
+} from "../lib/catalog.ts";
+
+import {
+  deviceId,
+  resetSupabaseClientForTests,
+  resolveSupabaseConfig,
+  rotateDeviceId,
+} from "../lib/supabase.ts";
+import {
+  ensureUuid,
+  mapCatalogueRowsToSkus,
+  mapLiveSessionToUserProfile,
+  mapOrderRowsToDeliveryOrders,
+  mapOutboxFnToLiveRpc,
+  mapPaymentRowsToRecords,
+  mapRepDayRowsToShifts,
+  mapRouteRowsToStops,
+  mapSalonRowsToSalons,
+  paisaToPkr,
+  pkrToPaisa,
+  SupabaseRpcError,
+} from "../lib/supabase-kiran.ts";
 
 const repUser: UserProfile = {
   id: "rep-karachi-pilot-01",
@@ -42,44 +68,72 @@ const repUser: UserProfile = {
   monthlyVisitTarget: 50,
 };
 
-test("rep check-in, negative count refusal, and dependent check-out variance", async () => {
+const managerUser: UserProfile = {
+  id: "mgr-karachi-pilot-01",
+  email: "sana@kirancompany.pk",
+  fullName: "Sana Tariq",
+  role: "manager",
+  territory: "Karachi Operations",
+  monthlyVisitTarget: 0,
+};
+
+const ownerUser: UserProfile = {
+  id: "own-karachi-pilot-01",
+  email: "owner@kirancompany.pk",
+  fullName: "Bilal Raza",
+  role: "owner",
+  territory: "All Karachi Territories",
+  monthlyVisitTarget: 0,
+};
+
+test("rep one-tap check-in, rep payment refusal (403), and daily close check-out", async () => {
   const repo = new MemoryKiranRepository();
 
   await assert.rejects(
-    () => repo.executeRpc(repUser, "rep_check_in", { p_id: "bad-1", p_bag_count: -1, p_fail: true }),
+    () =>
+      repo.executeRpc(repUser, "rep_record_payment", {
+        p_id: "bad-pay-1",
+        p_salon_id: "sal-dha-02",
+        p_amount: 5000,
+      }),
+    (err: unknown) => err instanceof RpcError && err.status === 403 && err.code === "42501",
+  );
+
+  await assert.rejects(
+    () =>
+      repo.executeRpc(repUser, "rep_check_in", {
+        p_id: "bad-chk-1",
+        p_fail: true,
+      }),
     (err: unknown) => err instanceof RpcError && err.status === 422,
   );
 
   const checkIn = await repo.executeRpc(repUser, "rep_check_in", {
     p_id: "chk-1",
-    p_bag_count: 24,
+    p_counted: [],
   });
   assert.equal(checkIn.id, "chk-1");
+  assert.equal(checkIn.status, "open");
 
   // Idempotent replay returns same result without error
   const replay = await repo.executeRpc(repUser, "rep_check_in", {
     p_id: "chk-1",
-    p_bag_count: 24,
+    p_counted: [],
   });
   assert.equal(replay.id, "chk-1");
 
-  const count = await repo.executeRpc(repUser, "record_count", {
-    p_id: "cnt-1",
-    p_count: 22,
-  });
-  assert.equal(count.id, "cnt-1");
-
   const close = await repo.executeRpc(repUser, "rep_check_out", {
     p_id: "cls-1",
-    p_count_id: count.id,
   });
-  assert.equal(close.variance_units, -2);
+  assert.equal(close.status, "closed");
+  assert.equal(close.variance_units, 0);
 
-  const overview = await repo.getManagerOverview(repUser);
-  assert.equal(overview.shifts[0]?.approvalStatus, "flagged");
+  const overview = await repo.getManagerOverview(managerUser);
+  assert.equal(overview.shifts[0]?.status, "closed");
+  assert.equal(overview.shifts[0]?.approvalStatus, "approved");
 });
 
-test("visit logging, cash payment balance update, and monthly stats aggregation", async () => {
+test("visit logging, Manager/Owner off-app Bank-to-Bank & Cash-to-Cash settlements, and audit reversal", async () => {
   const repo = new MemoryKiranRepository();
   const before = await repo.getBootstrap(repUser);
   const cliftonBefore = before.salons.find((s) => s.id === "sal-clifton-01")!;
@@ -92,17 +146,95 @@ test("visit logging, cash payment balance update, and monthly stats aggregation"
     p_lng: 67.03,
   });
 
-  await repo.executeRpc(repUser, "rep_record_payment", {
-    p_id: "pay-101",
-    p_salon_id: "sal-clifton-01",
-    p_amount: 15000,
-  });
+  // Bank-to-Bank requires valid bankName & bankReference
+  await assert.rejects(
+    () =>
+      repo.handleManagerApproval(
+        {
+          action: "record_office_payment",
+          salonId: "sal-clifton-01",
+          method: "bank_transfer",
+          amountPkr: 15000,
+          bankName: "",
+          bankReference: "",
+        },
+        managerUser,
+      ),
+    (err: unknown) => err instanceof RpcError && err.status === 422,
+  );
 
-  const after = await repo.getBootstrap(repUser);
-  const cliftonAfter = after.salons.find((s) => s.id === "sal-clifton-01")!;
+  // Field Rep cannot record or approve office payments
+  await assert.rejects(
+    () =>
+      repo.handleManagerApproval(
+        {
+          action: "record_office_payment",
+          salonId: "sal-clifton-01",
+          method: "cash",
+          amountPkr: 5000,
+        },
+        repUser,
+      ),
+    (err: unknown) => err instanceof RpcError && err.status === 403,
+  );
+
+  // Manager notes Bank-to-Bank paid settlement
+  const bankRes = await repo.handleManagerApproval(
+    {
+      action: "record_office_payment",
+      salonId: "sal-clifton-01",
+      method: "bank_transfer",
+      amountPkr: 15000,
+      bankName: "HBL Bank",
+      bankReference: "IBFT-990123",
+    },
+    managerUser,
+  );
+  assert.equal(bankRes.ok, true);
+  assert.match(bankRes.message, /R-26-/);
+
+  const afterBank = await repo.getBootstrap(repUser);
+  const cliftonAfter = afterBank.salons.find((s) => s.id === "sal-clifton-01")!;
   assert.equal(cliftonAfter.outstanding_balance, cliftonBefore.outstanding_balance - 15000);
-  assert.equal(after.stats.visitsCompleted, before.stats.visitsCompleted + 1);
-  assert.equal(after.stats.cashCollectedPkr, before.stats.cashCollectedPkr + 15000);
+  assert.equal(afterBank.route.find((r) => r.salon_id === "sal-clifton-01")?.balance, cliftonAfter.outstanding_balance);
+  assert.equal(afterBank.stats.visitsCompleted, before.stats.visitsCompleted + 1);
+  assert.equal(afterBank.stats.cashCollectedPkr, before.stats.cashCollectedPkr + 15000);
+
+  const overviewAfterBank = await repo.getManagerOverview(managerUser);
+  const recordedPay = overviewAfterBank.recentPayments.find((p) => p.bankReference === "IBFT-990123")!;
+  assert.ok(recordedPay);
+  assert.equal(recordedPay.bankName, "HBL Bank");
+  assert.equal(recordedPay.recordedByName, "Sana Tariq");
+
+  // Manager cannot reverse their own recorded settlement
+  await assert.rejects(
+    () =>
+      repo.handleManagerApproval(
+        {
+          action: "reverse_office_payment",
+          paymentId: recordedPay.id,
+          reason: "Entered wrong bank ref",
+        },
+        managerUser,
+      ),
+    (err: unknown) => err instanceof RpcError && err.status === 403,
+  );
+
+  // Owner can reverse Manager's settlement with valid 5-300 char reason
+  const revRes = await repo.handleManagerApproval(
+    {
+      action: "reverse_office_payment",
+      paymentId: recordedPay.id,
+      reason: "Reversed: duplicate IBFT entry verified",
+    },
+    ownerUser,
+  );
+  assert.equal(revRes.ok, true);
+
+  const afterReverse = await repo.getBootstrap(repUser);
+  const cliftonRestored = afterReverse.salons.find((s) => s.id === "sal-clifton-01")!;
+  assert.equal(cliftonRestored.outstanding_balance, cliftonBefore.outstanding_balance);
+  assert.equal(afterReverse.stats.cashCollectedPkr, before.stats.cashCollectedPkr);
 });
 
 test("delivery submission and dependent signature attachment", async () => {
@@ -622,7 +754,7 @@ test("buildDeliveryReceiptPdfModel and createDeliveryReceiptPdfDocument build va
   const salon = INITIAL_SALONS.find((s) => s.id === "sal-clifton-01")!;
 
   const model = buildDeliveryReceiptPdfModel(order, salon);
-  assert.equal(model.filename, "Kiran-Receipt-ORD-KRN-2026-9901.pdf");
+  assert.equal(model.filename, "Lumex-Receipt-ORD-KRN-2026-9901.pdf");
   assert.equal(model.statusLabel, "Delivered");
   assert.equal(model.acknowledgementLabel, "Customer digital signature attached");
   assert.equal(model.invoiceTotalFormatted, "PKR 23,400");
@@ -827,15 +959,19 @@ test("optimizeRouteStops reorders pending stops by shortest path from geolocatio
   );
 });
 
-test("filterOrderSkus matches products by name, category, SKU code, and multi-word queries", () => {
+test("filterOrderSkus matches products by name, category, brand, volume, SKU code, and multi-word queries", () => {
   assert.equal(filterOrderSkus(INITIAL_SKUS, "").length, INITIAL_SKUS.length);
   assert.equal(filterOrderSkus(INITIAL_SKUS, "   ").length, INITIAL_SKUS.length);
 
-  const byCategory = filterOrderSkus(INITIAL_SKUS, "treatment");
-  assert.equal(byCategory.length, 2);
-  assert.ok(byCategory.every((s) => s.category === "Treatment"));
+  const byTreatmentQuery = filterOrderSkus(INITIAL_SKUS, "treatment");
+  const expectedTreatments = INITIAL_SKUS.filter((s) => s.category === "Treatment");
+  assert.ok(expectedTreatments.every((t) => byTreatmentQuery.some((m) => m.id === t.id)));
 
-  const byName = filterOrderSkus(INITIAL_SKUS, "Argan");
+  const byStyling = filterOrderSkus(INITIAL_SKUS, "Styling");
+  const expectedStyling = INITIAL_SKUS.filter((s) => s.category === "Styling");
+  assert.ok(expectedStyling.every((st) => byStyling.some((m) => m.id === st.id)));
+
+  const byName = filterOrderSkus(INITIAL_SKUS, "KRN-ARG-100");
   assert.equal(byName.length, 1);
   assert.equal(byName[0]?.id, "sku-arg-100");
 
@@ -843,12 +979,328 @@ test("filterOrderSkus matches products by name, category, SKU code, and multi-wo
   assert.equal(byCode.length, 1);
   assert.equal(byCode[0]?.id, "sku-clr-06");
 
-  const multiToken = filterOrderSkus(INITIAL_SKUS, "treatment 500ml");
+  const multiToken = filterOrderSkus(INITIAL_SKUS, "kiran keratin 500ml");
   assert.equal(multiToken.length, 1);
   assert.equal(multiToken[0]?.id, "sku-krt-500");
 
+  const byBrandAndVolume = filterOrderSkus(INITIAL_SKUS, "Mocheqi 318ml");
+  assert.equal(byBrandAndVolume.length, 1);
+  assert.equal(byBrandAndVolume[0]?.id, "sku-msk-shampoo-318");
+
   assert.equal(filterOrderSkus(INITIAL_SKUS, "nonexistent-item").length, 0);
 });
+
+test("Lumex and Mocheqi Musk catalog supports brand/category search, role governance, and Owner/Manager SKU upsert", async () => {
+  assert.equal(canManageCatalog("manager"), true);
+  assert.equal(canManageCatalog("owner"), true);
+  assert.equal(canManageCatalog("rep"), false);
+  assert.equal(canManageCatalog(undefined), false);
+
+  const lumexItems = filterCatalogSkus(INITIAL_SKUS, { brand: "Lumex" });
+  assert.ok(lumexItems.length >= 4);
+  assert.ok(lumexItems.every((s) => s.brand === "Lumex" && s.volume_size && s.product_type && s.recommended_use));
+
+  const mocheqiItems = filterCatalogSkus(INITIAL_SKUS, { brand: "Mocheqi Musk" });
+  assert.ok(mocheqiItems.length >= 4);
+  assert.ok(mocheqiItems.every((s) => s.brand === "Mocheqi Musk" && s.price > 0));
+
+  const useSearch = filterCatalogSkus(INITIAL_SKUS, {
+    brand: "Lumex",
+    query: "yellow brass blonde",
+  });
+  assert.equal(useSearch.length, 1);
+  assert.equal(useSearch[0]?.id, "sku-lmx-toner-300");
+
+  const invalid = validateCatalogSkuInput({
+    sku_code: "LMX-TEST",
+    name: "",
+    category: "Treatment",
+    price: 0,
+    bag_qty: 2,
+    unit: "Bottle",
+    brand: "Lumex",
+    product_type: "Keratin",
+    volume_size: "500ml",
+    recommended_use: "Apply evenly",
+  });
+  assert.equal(invalid.ok, false);
+
+  const repo = new MemoryKiranRepository();
+  const created = await repo.upsertCatalogSku({
+    sku_code: "MSK-GNG-318",
+    name: "Mocheqi Musk Ginger Anti-Hairfall Shampoo 318ml",
+    category: "Shampoo",
+    price: 2550,
+    bag_qty: 9,
+    unit: "Bottle",
+    brand: "Mocheqi Musk",
+    product_type: "Scalp Strengthening Shampoo",
+    volume_size: "318ml",
+    recommended_use: "Massage onto wet scalp for 3 minutes before conditioning mask.",
+    image_key: "mocheqi-shampoo",
+  });
+  assert.equal(created.sku_code, "MSK-GNG-318");
+  assert.equal(created.brand, "Mocheqi Musk");
+
+  const updated = await repo.upsertCatalogSku(
+    {
+      sku_code: "MSK-GNG-318",
+      name: "Mocheqi Musk Ginger Root Therapy Shampoo 318ml",
+      category: "Shampoo",
+      price: 2700,
+      bag_qty: 11,
+      unit: "Bottle",
+      brand: "Mocheqi Musk",
+      product_type: "Scalp Strengthening Shampoo",
+      volume_size: "318ml",
+      recommended_use: "Massage onto wet scalp for 3 minutes before conditioning mask.",
+      image_key: "mocheqi-shampoo",
+    },
+    created.id,
+  );
+  assert.equal(updated.price, 2700);
+  assert.equal(updated.bag_qty, 11);
+
+  const boot = await repo.getBootstrap(repUser);
+  const found = boot.skus.find((s) => s.id === created.id);
+  assert.ok(found);
+  assert.equal(found?.name, "Mocheqi Musk Ginger Root Therapy Shampoo 318ml");
+
+  await assert.rejects(
+    () =>
+      repo.upsertCatalogSku({
+        sku_code: "MSK-GNG-318",
+        name: "Duplicate SKU",
+        category: "Shampoo",
+        price: 1000,
+        bag_qty: 1,
+        unit: "Bottle",
+        brand: "Mocheqi Musk",
+        product_type: "Shampoo",
+        volume_size: "318ml",
+        recommended_use: "Rinse",
+      }),
+    RpcError,
+  );
+});
+
+test("supabase.ts resolves config from env vars and handles Node deviceId safely", async () => {
+  const prevUrl = process.env.SUPABASE_URL;
+  const prevKey = process.env.SUPABASE_ANON_KEY;
+  resetSupabaseClientForTests();
+
+  process.env.SUPABASE_URL = "https://example-kiran.supabase.co";
+  process.env.SUPABASE_ANON_KEY = "anon-public-key-123";
+  try {
+    const cfg = await resolveSupabaseConfig();
+    assert.equal(cfg.supabaseUrl, "https://example-kiran.supabase.co");
+    assert.equal(cfg.supabaseAnonKey, "anon-public-key-123");
+    assert.equal(deviceId(), "web-server");
+    assert.equal(rotateDeviceId("web-old"), "web-server");
+  } finally {
+    resetSupabaseClientForTests();
+    if (prevUrl === undefined) delete process.env.SUPABASE_URL;
+    else process.env.SUPABASE_URL = prevUrl;
+    if (prevKey === undefined) delete process.env.SUPABASE_ANON_KEY;
+    else process.env.SUPABASE_ANON_KEY = prevKey;
+  }
+});
+
+test("supabase-kiran.ts enforces off-app payment governance, MFA flag, and maps normalized 63-table rows", () => {
+  assert.equal(pkrToPaisa(2450), 245000);
+  assert.equal(paisaToPkr(245000), 2450);
+
+  const validUuid = "11111111-2222-4333-8444-555555555555";
+  const orderUuid = "22222222-3333-4444-8555-666666666666";
+  const paymentUuid = "33333333-4444-4555-8666-777777777777";
+  assert.equal(ensureUuid(validUuid), validUuid);
+  assert.match(ensureUuid("non-uuid"), /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+
+  const checkInRpc = mapOutboxFnToLiveRpc("rep_check_in", {
+    p_id: "chk-1",
+    p_lat: 24.81,
+    p_lng: 67.03,
+    p_at_client: "2026-11-16T08:00:00Z",
+  });
+  assert.equal(checkInRpc.rpcName, "rep_check_in");
+  assert.deepEqual(checkInRpc.rpcArgs.p_counted, []);
+  assert.equal("p_bag_count" in checkInRpc.rpcArgs, false);
+
+  assert.throws(
+    () =>
+      mapOutboxFnToLiveRpc("rep_record_payment", {
+        p_id: validUuid,
+        p_salon_id: validUuid,
+        p_amount: 15000,
+        p_method: "cash",
+      }),
+    (err: unknown) => err instanceof SupabaseRpcError && err.status === 403 && err.code === "42501",
+  );
+
+  const cardRpc = mapOutboxFnToLiveRpc("rep_create_card", {
+    p_id: validUuid,
+    p_salon_id: validUuid,
+    p_sku_id: validUuid,
+    p_sku_name: "Lumex Keratin Mask 500ml",
+    p_qty: 3,
+  });
+  assert.equal(cardRpc.rpcName, "rep_create_card");
+  assert.equal(cardRpc.rpcArgs.p_body, "Lumex Keratin Mask 500ml × 3");
+  assert.deepEqual(cardRpc.rpcArgs.p_lines, [{ sku_id: validUuid, qty: 3 }]);
+
+  const ownerAal1 = mapLiveSessionToUserProfile(
+    {
+      user_id: validUuid,
+      full_name: "Bilal Raza",
+      role: "owner",
+      status: "active",
+      device_status: "approved",
+    },
+    { id: validUuid, email: "owner@kirancompany.pk" },
+    "Karachi South",
+    "aal1",
+  );
+  assert.equal(ownerAal1.role, "owner");
+  assert.equal(ownerAal1.deviceStatus, "approved");
+  assert.equal(ownerAal1.mfaRequired, true);
+
+  const ownerAal2 = mapLiveSessionToUserProfile(
+    { user_id: validUuid, full_name: "Bilal Raza", role: "owner", status: "active" },
+    { id: validUuid, email: "owner@kirancompany.pk" },
+    "Karachi South",
+    "aal2",
+  );
+  assert.equal(ownerAal2.mfaRequired, false);
+
+  const mappedSkus = mapCatalogueRowsToSkus(
+    [
+      {
+        product_id: validUuid,
+        product_group_id: validUuid,
+        group_name: "Treatment",
+        brand_label: "Lumex",
+        name: "Lumex Repair Mask",
+        description: "Post-color mask",
+        skus: [
+          {
+            id: validUuid,
+            code: "LMX-MSK-500",
+            variant: "500ml",
+            unit: "ml",
+            size_value: 500,
+            list_price_paisa: 390000,
+            active: true,
+          },
+        ],
+      },
+    ],
+    [{ sku_id: validUuid, available: 14 }],
+  );
+  assert.equal(mappedSkus.length, 1);
+  assert.equal(mappedSkus[0]?.price, 3900);
+  assert.equal(mappedSkus[0]?.bag_qty, 14);
+  assert.equal(mappedSkus[0]?.category, "Treatment");
+
+  // Normalized salon + area + salon_contact + salon_credit + office_receivables_ageing
+  const receivables = new Map([[validUuid, 1850000]]);
+  const mappedSalons = mapSalonRowsToSalons(
+    [
+      {
+        id: validUuid,
+        name: "Salon Royale",
+        area: { name: "DHA Phase 6" },
+        stage: "vip",
+        verification_status: "pending",
+        salon_contact: [
+          { name: "Old Contact", phone: "0300-0000000", is_primary: false, active: false },
+          { name: "Farida Khan", phone: "0300-8234190", is_primary: true, active: true },
+        ],
+        salon_credit: { credit_limit_paisa: 7500000 },
+      },
+    ],
+    receivables,
+  );
+  assert.equal(mappedSalons[0]?.area, "DHA Phase 6");
+  assert.equal(mappedSalons[0]?.contact_person, "Farida Khan");
+  assert.equal(mappedSalons[0]?.phone, "0300-8234190");
+  assert.equal(mappedSalons[0]?.credit_limit, 75000);
+  assert.equal(mappedSalons[0]?.outstanding_balance, 18500);
+  assert.equal(mappedSalons[0]?.approval_status, "pending_review");
+
+  const stops = mapRouteRowsToStops(
+    [{ stop_id: validUuid, sequence: 1, salon_id: validUuid, reason: "payment", visited: false }],
+    mappedSalons,
+  );
+  assert.equal(stops[0]?.due_reason, "payment_due");
+  assert.equal(stops[0]?.balance, 18500);
+
+  // Normalized sales_order + sales_order_line + delivery + delivery_signature hydration
+  const mappedOrders = mapOrderRowsToDeliveryOrders(
+    [
+      {
+        id: orderUuid,
+        order_number: "SO-26-000010",
+        salon_id: validUuid,
+        total_paisa: 960000,
+        status: "confirmed",
+        created_at: "2026-11-15T10:00:00Z",
+      },
+    ],
+    new Map([[validUuid, "Salon Royale"]]),
+    {
+      linesByOrderId: new Map([
+        [orderUuid, [{ sku_name: "Lumex Repair Mask 500ml", qty: 2, price: 4800 }]],
+      ]),
+      deliveriesByOrderId: new Map([
+        [orderUuid, { status: "delivered", delivered_at: "2026-11-15T14:00:00Z" }],
+      ]),
+      signaturesByOrderId: new Map([[orderUuid, "signed:Farida Khan"]]),
+    },
+  );
+  assert.equal(mappedOrders[0]?.status, "delivered");
+  assert.equal(mappedOrders[0]?.items[0]?.sku_name, "Lumex Repair Mask 500ml");
+  assert.equal(mappedOrders[0]?.signature_data, "signed:Farida Khan");
+
+  // Disambiguated rep_day -> user_profile!rep_day_rep_id_fkey mapping
+  const shifts = mapRepDayRowsToShifts([
+    {
+      id: "shift-1",
+      rep_id: "rep-1",
+      status: "open",
+      check_in_at: "2026-11-15T08:00:00Z",
+      user_profile: { full_name: "Rashid Khan" },
+    },
+  ]);
+  assert.equal(shifts[0]?.repName, "Rashid Khan");
+
+  // Payment + receipt + payment_reversal + mayReverse enforcement
+  const payments = mapPaymentRowsToRecords(
+    [
+      {
+        id: paymentUuid,
+        salon_id: validUuid,
+        recorded_by: managerUser.id,
+        amount_paisa: 1500000,
+        method: "bank_transfer",
+        bank_name: "Meezan Bank",
+        bank_reference: "IBFT-12345",
+        recorded_at: "2026-11-15T12:00:00Z",
+      },
+    ],
+    new Map([[validUuid, "Salon Royale"]]),
+    new Map([[paymentUuid, "R-26-000009"]]),
+    new Map(),
+    new Map([[managerUser.id, "Sana Tariq"]]),
+    managerUser,
+  );
+  assert.equal(payments[0]?.receiptNumber, "R-26-000009");
+  assert.equal(payments[0]?.amount, 15000);
+  assert.equal(payments[0]?.bankName, "Meezan Bank");
+  assert.equal(payments[0]?.mayReverse, false); // manager cannot reverse self-recorded payment
+});
+
+
+
 
 
 

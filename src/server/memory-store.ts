@@ -1,3 +1,4 @@
+import { validateCatalogSkuInput, type CatalogSkuInput } from "../lib/catalog.ts";
 import {
   INITIAL_ORDERS,
   INITIAL_ROUTE,
@@ -83,20 +84,32 @@ export class MemoryKiranRepository implements KiranRepository {
     this.payments.push(
       {
         id: "pay-seed-01",
-        repId: "rep-karachi-pilot-01",
+        repId: "mgr-karachi-hq-01",
         salonId: "sal-clifton-01",
         salonName: "Toni&Guy Clifton Branch",
         amount: 32000,
-        method: "cash",
+        method: "bank_transfer",
+        bankName: "Meezan Bank",
+        bankReference: "IBFT-884201",
+        receiptNumber: "R-26-000001",
+        recordedByName: "Tariq Mahmood (Office Manager)",
+        recordedByRole: "manager",
+        reversed: false,
+        mayReverse: true,
         capturedAt: "2026-11-08T09:45:00Z",
       },
       {
         id: "pay-seed-02",
-        repId: "rep-karachi-pilot-01",
+        repId: "mgr-karachi-hq-01",
         salonId: "sal-saddar-03",
         salonName: "Karachi Looks Beauty Lounge",
         amount: 18500,
         method: "cash",
+        receiptNumber: "R-26-000002",
+        recordedByName: "Tariq Mahmood (Office Manager)",
+        recordedByRole: "manager",
+        reversed: false,
+        mayReverse: true,
         capturedAt: "2026-11-05T14:50:00Z",
       },
     );
@@ -124,7 +137,9 @@ export class MemoryKiranRepository implements KiranRepository {
   }
 
   private computeMonthlyStats(user: UserProfile): RepMonthlyStats {
-    const cashCollectedPkr = this.payments.reduce((acc, p) => acc + p.amount, 0);
+    const cashCollectedPkr = this.payments
+      .filter((p) => !p.reversed)
+      .reduce((acc, p) => acc + p.amount, 0);
     const visitsCompleted = this.visits.length;
     const ordersCount = this.orders.length + this.orderCards.length;
     return {
@@ -176,27 +191,22 @@ export class MemoryKiranRepository implements KiranRepository {
 
     switch (fn) {
       case "rep_check_in": {
-        const bagCount = Number(args.p_bag_count ?? args.bag_count ?? 0);
-        if (args.p_fail || args.fail || !Number.isFinite(bagCount) || bagCount < 0) {
-          throw new RpcError(
-            "Invalid check-in parameters. Bag stock count cannot be negative.",
-            422,
-            "22023",
-          );
+        if (args.p_fail || args.fail) {
+          throw new RpcError("Invalid check-in parameters.", 422, "22023");
         }
         const shift: RepShift = {
           id,
           repId: user.id,
           repName: user.fullName,
           status: "open",
-          openingBagCount: bagCount,
+          openingBagCount: 0,
           closingBagCount: null,
-          expectedBagCount: bagCount,
+          expectedBagCount: 0,
           varianceUnits: 0,
           countRecordId: null,
           openedAt: at,
           closedAt: null,
-          approvalStatus: "pending",
+          approvalStatus: "approved",
         };
         // Close any stale open shift for same rep first
         for (const s of this.shifts) {
@@ -206,14 +216,14 @@ export class MemoryKiranRepository implements KiranRepository {
           }
         }
         this.shifts.unshift(shift);
-        result = { id, rep_day_id: id, status: "open", opening_bag_count: bagCount };
+        result = { id, rep_day_id: id, status: "open", opening_bag_count: 0 };
         break;
       }
 
       case "record_count": {
         const count = Number(args.p_count ?? 0);
         if (!Number.isFinite(count) || count < 0) {
-          throw new RpcError("Invalid stock count. Must be zero or positive.", 422, "22023");
+          throw new RpcError("Invalid count. Must be zero or positive.", 422, "22023");
         }
         this.counts.set(id, { id, repId: user.id, count, at });
         result = { id, count, recorded_at: at };
@@ -221,27 +231,23 @@ export class MemoryKiranRepository implements KiranRepository {
       }
 
       case "rep_check_out": {
-        const countId = typeof args.p_count_id === "string" ? args.p_count_id : null;
-        const countRec = countId ? this.counts.get(countId) : null;
         const openShift =
           this.shifts.find((s) => s.repId === user.id && s.status === "open") ??
           this.shifts.find((s) => s.status === "open");
 
-        const closingCount = countRec ? countRec.count : this.getCurrentBagUnits();
         if (openShift) {
-          const expected = openShift.expectedBagCount ?? openShift.openingBagCount;
           openShift.status = "closed";
-          openShift.closingBagCount = closingCount;
-          openShift.countRecordId = countId;
-          openShift.varianceUnits = closingCount - expected;
+          openShift.closingBagCount = 0;
+          openShift.countRecordId = null;
+          openShift.varianceUnits = 0;
           openShift.closedAt = at;
-          openShift.approvalStatus = openShift.varianceUnits === 0 ? "approved" : "flagged";
+          openShift.approvalStatus = "approved";
         }
         result = {
           id,
           status: "closed",
-          closing_bag_count: closingCount,
-          variance_units: openShift ? openShift.varianceUnits : 0,
+          closing_bag_count: 0,
+          variance_units: 0,
         };
         break;
       }
@@ -332,39 +338,11 @@ export class MemoryKiranRepository implements KiranRepository {
       }
 
       case "rep_record_payment": {
-        const salonId = String(args.p_salon_id ?? "");
-        const amount = Number(args.p_amount ?? 0);
-        const method = String(args.p_method ?? "cash");
-        const salon = this.salons.find((s) => s.id === salonId);
-        if (!salon) {
-          throw new RpcError(`Salon '${salonId}' not found.`, 404, "P0002");
-        }
-        if (!Number.isFinite(amount) || amount <= 0) {
-          throw new RpcError("Payment amount must be greater than zero.", 422, "22023");
-        }
-        this.payments.unshift({
-          id,
-          repId: user.id,
-          salonId,
-          salonName: salon.name,
-          amount,
-          method,
-          capturedAt: at,
-        });
-        salon.outstanding_balance = Math.max(0, salon.outstanding_balance - amount);
-        for (const stop of this.route) {
-          if (stop.salon_id === salonId) {
-            stop.balance = salon.outstanding_balance;
-          }
-        }
-        result = {
-          id,
-          payment_id: id,
-          amount,
-          remaining_balance: salon.outstanding_balance,
-          status: "recorded",
-        };
-        break;
+        throw new RpcError(
+          "Field reps cannot collect or approve payments. Off-app Bank-to-Bank and Cash-to-Cash settlements must be recorded and marked paid by an Office Manager or Owner.",
+          403,
+          "42501",
+        );
       }
 
       case "rep_create_card": {
@@ -545,7 +523,10 @@ export class MemoryKiranRepository implements KiranRepository {
     };
   }
 
-  async handleManagerApproval(input: ManagerApprovalAction): Promise<{ ok: true; message: string }> {
+  async handleManagerApproval(
+    input: ManagerApprovalAction,
+    actor?: UserProfile,
+  ): Promise<{ ok: true; message: string }> {
     switch (input.action) {
       case "approve_salon": {
         const salon = this.salons.find((s) => s.id === input.id);
@@ -679,14 +660,14 @@ export class MemoryKiranRepository implements KiranRepository {
         const shift = this.shifts.find((s) => s.id === input.id);
         if (!shift) throw new RpcError("Shift record not found.", 404, "P0002");
         shift.approvalStatus = "approved";
-        return { ok: true, message: "Shift bag stock count approved." };
+        return { ok: true, message: "Shift check-in approved." };
       }
 
       case "flag_shift": {
         const shift = this.shifts.find((s) => s.id === input.id);
         if (!shift) throw new RpcError("Shift record not found.", 404, "P0002");
         shift.approvalStatus = "flagged";
-        return { ok: true, message: "Shift flagged for stock audit." };
+        return { ok: true, message: "Shift flagged for review." };
       }
 
       case "update_shop_order_status": {
@@ -737,6 +718,109 @@ export class MemoryKiranRepository implements KiranRepository {
             updatedCount === 1
               ? "1 order marked as delivered."
               : `${updatedCount} orders marked as delivered.`,
+        };
+      }
+
+      case "record_office_payment": {
+        if (actor && actor.role === "rep") {
+          throw new RpcError(
+            "Only an Office Manager or Owner can record and mark off-app payments as paid.",
+            403,
+            "42501",
+          );
+        }
+        const salon = this.salons.find((s) => s.id === input.salonId);
+        if (!salon) throw new RpcError("Salon not found.", 404, "P0002");
+        const amount = Math.round(Number(input.amountPkr));
+        if (!Number.isFinite(amount) || amount <= 0) {
+          throw new RpcError("Payment amount must be greater than zero PKR.", 422, "22023");
+        }
+        const method = input.method === "bank_transfer" ? "bank_transfer" : "cash";
+        let bankName: string | null = null;
+        let bankReference: string | null = null;
+        if (method === "bank_transfer") {
+          bankName = (input.bankName ?? "").trim();
+          bankReference = (input.bankReference ?? "").trim();
+          if (bankName.length < 2 || bankName.length > 60) {
+            throw new RpcError("Bank name must be 2 to 60 characters for Bank-to-Bank transfers.", 422, "22023");
+          }
+          if (bankReference.length < 3 || bankReference.length > 60) {
+            throw new RpcError("Bank reference / IBFT ID must be 3 to 60 characters.", 422, "22023");
+          }
+        }
+        const seq = this.payments.length + 1;
+        const receiptNumber = `R-26-${String(seq).padStart(6, "0")}`;
+        const recordedAt = new Date().toISOString();
+        const actorRole: UserProfile["role"] = actor?.role === "owner" ? "owner" : "manager";
+        this.payments.unshift({
+          id: `pay-${Date.now()}-${seq}`,
+          repId: actor?.id ?? "mgr-karachi-hq-01",
+          salonId: salon.id,
+          salonName: salon.name,
+          amount,
+          method,
+          bankName,
+          bankReference,
+          receiptNumber,
+          recordedByName: actor?.fullName ?? "Tariq Mahmood (Office Manager)",
+          recordedByRole: actorRole,
+          reversed: false,
+          mayReverse: true,
+          capturedAt: recordedAt,
+        });
+        salon.outstanding_balance = Math.max(0, salon.outstanding_balance - amount);
+        for (const stop of this.route) {
+          if (stop.salon_id === salon.id) {
+            stop.balance = salon.outstanding_balance;
+          }
+        }
+        return {
+          ok: true,
+          message:
+            method === "bank_transfer"
+              ? `Bank-to-Bank payment PKR ${amount.toLocaleString()} marked Paid (${receiptNumber}).`
+              : `Cash-to-Cash settlement PKR ${amount.toLocaleString()} marked Paid (${receiptNumber}).`,
+        };
+      }
+
+      case "reverse_office_payment": {
+        if (actor && actor.role === "rep") {
+          throw new RpcError("Only an Office Manager or Owner can reverse a recorded payment.", 403, "42501");
+        }
+        const reason = (input.reason ?? "").trim();
+        if (reason.length < 5 || reason.length > 300) {
+          throw new RpcError("Reversal reason must be between 5 and 300 characters.", 422, "22023");
+        }
+        const payment = this.payments.find((p) => p.id === input.paymentId);
+        if (!payment) {
+          throw new RpcError("Payment record not found.", 404, "P0002");
+        }
+        if (payment.reversed) {
+          throw new RpcError("This payment is already reversed.", 409, "55000");
+        }
+        if (actor?.role === "manager" && payment.repId === actor.id) {
+          throw new RpcError(
+            "A manager cannot reverse a payment they recorded; the Owner can reverse it.",
+            403,
+            "42501",
+          );
+        }
+        payment.reversed = true;
+        payment.reversalReason = reason;
+        payment.reversedAt = new Date().toISOString();
+        payment.mayReverse = false;
+        const salon = this.salons.find((s) => s.id === payment.salonId);
+        if (salon) {
+          salon.outstanding_balance += payment.amount;
+          for (const stop of this.route) {
+            if (stop.salon_id === salon.id) {
+              stop.balance = salon.outstanding_balance;
+            }
+          }
+        }
+        return {
+          ok: true,
+          message: `Payment ${payment.receiptNumber || payment.id} reversed and salon balance restored.`,
         };
       }
     }
@@ -799,5 +883,68 @@ export class MemoryKiranRepository implements KiranRepository {
       imported++;
     }
     return imported;
+  }
+
+  async upsertCatalogSku(input: CatalogSkuInput, existingId?: string): Promise<SKU> {
+    const validated = validateCatalogSkuInput(input);
+    if (validated.ok === false) {
+      throw new RpcError(validated.error, 400, "22023");
+    }
+    const clean = validated.value;
+
+    if (existingId) {
+      const existing = this.skus.find((item) => item.id === existingId);
+      if (!existing) {
+        throw new RpcError("Product SKU not found.", 404, "P0002");
+      }
+      const duplicate = this.skus.find(
+        (item) =>
+          item.id !== existingId &&
+          item.sku_code.toLowerCase() === clean.sku_code.toLowerCase(),
+      );
+      if (duplicate) {
+        throw new RpcError(`SKU code ${clean.sku_code} is already assigned to another product.`, 409, "23505");
+      }
+
+      existing.sku_code = clean.sku_code;
+      existing.name = clean.name;
+      existing.category = clean.category;
+      existing.price = clean.price;
+      existing.bag_qty = clean.bag_qty;
+      existing.unit = clean.unit;
+      existing.brand = clean.brand;
+      existing.product_type = clean.product_type;
+      existing.volume_size = clean.volume_size;
+      existing.recommended_use = clean.recommended_use;
+      if (clean.image_key) {
+        existing.image_key = clean.image_key;
+      }
+      return clone(existing);
+    }
+
+    const duplicate = this.skus.find(
+      (item) => item.sku_code.toLowerCase() === clean.sku_code.toLowerCase(),
+    );
+    if (duplicate) {
+      throw new RpcError(`SKU code ${clean.sku_code} already exists in catalog.`, 409, "23505");
+    }
+
+    const slug = clean.sku_code.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const created: SKU = {
+      id: `sku-${slug || Date.now()}-${this.skus.length + 1}`,
+      sku_code: clean.sku_code,
+      name: clean.name,
+      category: clean.category,
+      price: clean.price,
+      bag_qty: clean.bag_qty,
+      unit: clean.unit,
+      brand: clean.brand,
+      product_type: clean.product_type,
+      volume_size: clean.volume_size,
+      recommended_use: clean.recommended_use,
+      image_key: clean.image_key,
+    };
+    this.skus.push(created);
+    return clone(created);
   }
 }

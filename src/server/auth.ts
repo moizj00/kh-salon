@@ -23,6 +23,14 @@ const DEMO_USERS: Record<string, UserProfile> = {
     territory: "Karachi HQ",
     monthlyVisitTarget: 50,
   },
+  "demo-owner-token": {
+    id: "own-karachi-hq-01",
+    email: "owner@kirancompany.pk",
+    fullName: "Bilal Raza (Owner)",
+    role: "owner",
+    territory: "Karachi HQ",
+    monthlyVisitTarget: 50,
+  },
 };
 
 export function isSupabaseAuthConfigured(): boolean {
@@ -133,7 +141,12 @@ export async function resolveUserFromToken(token: string): Promise<UserProfile |
 }
 
 export function issueDemoSession(role: UserRole): { token: string; user: UserProfile } {
-  const token = role === "manager" ? "demo-manager-token" : "demo-rep-token";
+  const token =
+    role === "owner"
+      ? "demo-owner-token"
+      : role === "manager"
+        ? "demo-manager-token"
+        : "demo-rep-token";
   return { token, user: DEMO_USERS[token] };
 }
 

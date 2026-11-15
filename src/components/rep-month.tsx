@@ -55,7 +55,7 @@ export const RepMonth: React.FC<RepMonthProps> = ({ stats }) => {
         <div className="p-2.5 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb]/60 dark:border-[#3a3330]">
           <div className="flex items-center justify-center text-[#6b625e] dark:text-[#a59b96] mb-1">
             <DollarSign className="w-3.5 h-3.5 text-amber-600 mr-1" />
-            <span className="text-[11px] font-semibold">Cash Recv</span>
+            <span className="text-[11px] font-semibold">Verified Recv</span>
           </div>
           <div className="text-lg font-bold tabular-nums text-[#1d1a19] dark:text-[#f2eeec]">
             {formatPkrCompact(stats.cashCollectedPkr)}
