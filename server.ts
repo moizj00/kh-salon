@@ -259,7 +259,21 @@ async function startServer() {
     }
   });
 
-  // Office Manager Overview & Approvals
+  // Office Manager Overview, Cash Ledger & Approvals
+  app.get("/api/manager/cash-ledger", requireAuth, async (req: AuthenticatedRequest, res) => {
+    if (req.user?.role !== "owner" && req.user?.role !== "manager") {
+      res.status(403).json({ error: "Only an Owner or Office Manager can access the Cash & Bank Ledger." });
+      return;
+    }
+    try {
+      const entries = await repo.listCashLedgerEntries();
+      res.json({ entries });
+    } catch (err) {
+      const status = err instanceof RpcError ? err.status : 500;
+      res.status(status).json({ error: err instanceof Error ? err.message : "Failed to load cash ledger." });
+    }
+  });
+
   app.get("/api/manager/overview", requireAuth, async (req: AuthenticatedRequest, res) => {
     try {
       const overview = await repo.getManagerOverview(req.user!);

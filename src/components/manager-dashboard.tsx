@@ -18,8 +18,16 @@ import {
   ShoppingBag,
   Store,
   X,
+  BellRing,
+  BookOpen,
 } from "lucide-react";
-import { fetchManagerOverview, resendDeliveryNotification, submitManagerApproval } from "../lib/api";
+import {
+  apiFetch,
+  fetchManagerOverview,
+  getAuthMode,
+  resendDeliveryNotification,
+  submitManagerApproval,
+} from "../lib/api";
 import { canManageCatalog, getSkuBrand } from "../lib/catalog";
 import type { SKU } from "../lib/data";
 import { downloadDeliveryOrdersCsv } from "../lib/csv";
@@ -30,6 +38,10 @@ import {
 } from "../lib/order-card-bulk";
 import { SALON_SORT_OPTIONS, sortSalons, type SalonSortKey } from "../lib/salon-sort";
 import { when } from "../lib/time";
+import { ensureUuid } from "../lib/supabase-kiran";
+import { getSupabaseClient } from "../lib/supabase";
+import { ManagerLedgerView } from "./manager-ledger-view";
+import { SalonRestockAlerts } from "./salon-restock-alerts";
 import { ProductCatalogDrawer } from "./product-catalog-drawer";
 import { ProductThumbnail } from "./product-thumbnail";
 import type {
@@ -57,7 +69,7 @@ interface ManagerDashboardProps {
   userRole?: UserRole;
 }
 
-type ManagerSection = "approvals" | "collections" | "orders" | "inventory";
+type ManagerSection = "approvals" | "ledger" | "salon-stock" | "collections" | "orders" | "inventory";
 
 export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   showToast,
@@ -317,6 +329,54 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
     }
   };
 
+  const handleDraftRestockCard = async (card: {
+    salonId: string;
+    salonName: string;
+    skuId: string;
+    skuName: string;
+    qty: number;
+    unitPrice: number;
+    notes?: string;
+  }) => {
+    const cardId = `crd-${Date.now()}`;
+    if (getAuthMode() === "supabase") {
+      const client = await getSupabaseClient();
+      if (client) {
+        const { error } = await client.schema("app").rpc("rep_create_card", {
+          p_id: ensureUuid(),
+          p_salon_id: ensureUuid(card.salonId),
+          p_body: card.notes || `Proactive restock order: ${card.qty}x ${card.skuName}`,
+          p_items: [
+            {
+              sku_id: ensureUuid(card.skuId),
+              qty: card.qty,
+              price_paisa: Math.round(card.unitPrice * 100),
+            },
+          ],
+        });
+        if (error) {
+          throw new Error(error.message || "Failed to create restock card in Supabase.");
+        }
+      }
+    } else {
+      await apiFetch("/api/rpc/rep_create_card", {
+        method: "POST",
+        body: JSON.stringify({
+          p_id: cardId,
+          p_salon_id: card.salonId,
+          p_sku_id: card.skuId,
+          p_sku_name: card.skuName,
+          p_qty: card.qty,
+          p_total: card.unitPrice * card.qty,
+          p_notes: card.notes || null,
+          p_at_client: new Date().toISOString(),
+        }),
+      });
+    }
+    await load();
+    onApprovedChange?.();
+  };
+
   if (loading && !data) {
     return (
       <div className="space-y-4">
@@ -369,6 +429,21 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
       return acc;
     }, {}),
   );
+
+  const isManagerOrOwner = userRole === "manager" || userRole === "owner";
+
+  const managerTabs = [
+    { id: "approvals" as const, label: `Approvals (${pendingApprovalCount})`, icon: ClipboardCheck },
+    ...(isManagerOrOwner
+      ? [
+          { id: "ledger" as const, label: "Cash & Bank Ledger", icon: Coins },
+          { id: "salon-stock" as const, label: "Salon Stock & Restock Alerts", icon: BellRing },
+        ]
+      : []),
+    { id: "collections" as const, label: "Collections & Salons", icon: Building2 },
+    { id: "orders" as const, label: `Shop & Deliveries (${data.shopOrders.length})`, icon: ShoppingBag },
+    { id: "inventory" as const, label: "Warehouse Stock & Demand", icon: Package },
+  ];
 
   return (
     <div className="space-y-5">
@@ -486,13 +561,19 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
           </div>
         </div>
 
-        <div className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330]">
-          <div className="text-xs text-[#6b625e] dark:text-[#a59b96]">Monthly Off-App Collections</div>
+        <div
+          onClick={() => setSection("ledger")}
+          className="p-4 rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] cursor-pointer hover:border-[#7a2e4a] transition-colors"
+        >
+          <div className="flex items-center justify-between text-xs text-[#6b625e] dark:text-[#a59b96]">
+            <span>Off-App Settlements Ledger</span>
+            <Coins className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+          </div>
           <div className="text-2xl font-bold tabular-nums mt-1 text-emerald-700 dark:text-emerald-400">
             PKR {data.stats.cashCollectedPkr.toLocaleString()}
           </div>
-          <div className="text-[11px] text-[#6b625e] dark:text-[#a59b96] mt-0.5">
-            {data.recentPayments.filter((p) => !p.reversed).length} verified off-app receipts
+          <div className="text-[11px] text-[#7a2e4a] dark:text-[#d77a9c] mt-0.5 font-medium">
+            Open Cash &amp; Bank Ledger &rarr;
           </div>
         </div>
 
@@ -519,14 +600,7 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
 
       {/* Section Tabs */}
       <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
-        {(
-          [
-            { id: "approvals", label: `Approvals (${pendingApprovalCount})`, icon: ClipboardCheck },
-            { id: "collections", label: "Collections & Salons", icon: Coins },
-            { id: "orders", label: `Shop & Deliveries (${data.shopOrders.length})`, icon: ShoppingBag },
-            { id: "inventory", label: "Stock & Demand", icon: Package },
-          ] as const
-        ).map((tab) => {
+        {managerTabs.map((tab) => {
           const Icon = tab.icon;
           return (
             <button
@@ -849,6 +923,62 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
         </div>
       )}
 
+      {/* ================= SECTION: CASH & BANK LEDGER ================= */}
+      {section === "ledger" && isManagerOrOwner && (
+        <ManagerLedgerView
+          initialEntries={data.cashLedgerEntries}
+          userRole={userRole}
+          showToast={showToast}
+          onRecordPaymentClick={() => openRecordPaymentModal()}
+          onReversePaymentClick={(paymentId) => {
+            const pay = data.recentPayments.find((p) => p.id === paymentId);
+            if (pay) {
+              setReverseModalPayment(pay);
+              setReverseReason("");
+            } else {
+              showToast("Payment record not found.", "warn");
+            }
+          }}
+          onViewReceipt={(receiptNumber) => {
+            const order = data.deliveryOrders.find(
+              (o) => o.order_number === receiptNumber || o.id === receiptNumber,
+            );
+            if (order) {
+              setReceiptOrder(order);
+            } else {
+              showToast(`Receipt ${receiptNumber} on file.`, "info");
+            }
+          }}
+        />
+      )}
+
+      {/* ================= SECTION: CLIENT SALON STOCK & RESTOCK ALERTS ================= */}
+      {section === "salon-stock" && isManagerOrOwner && (
+        <SalonRestockAlerts
+          salons={data.salons}
+          deliveries={data.deliveryOrders}
+          skus={data.skus}
+          userRole={userRole}
+          showToast={showToast}
+          onDraftRestockCard={handleDraftRestockCard}
+        />
+      )}
+
+      {!isManagerOrOwner && (section === "ledger" || section === "salon-stock") && (
+        <div className="p-6 rounded-2xl bg-white dark:bg-[#211d1b] border border-amber-200 dark:border-amber-900/50 text-center space-y-2">
+          <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+            Access Restricted: Client Salon Stock and Cash Ledger are strictly reserved for Office Manager and Owner roles.
+          </p>
+          <button
+            type="button"
+            onClick={() => setSection("approvals")}
+            className="px-4 py-2 rounded-xl bg-[#7a2e4a] text-white text-xs font-semibold"
+          >
+            Return to Operations
+          </button>
+        </div>
+      )}
+
       {/* ================= SECTION 2: COLLECTIONS & SALONS ================= */}
       {section === "collections" && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -940,13 +1070,26 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                       </td>
                       {canManageCatalog(userRole) && (
                         <td className="py-2.5 pl-3 text-right">
-                          <button
-                            type="button"
-                            onClick={() => openRecordPaymentModal(s.id, s.outstanding_balance)}
-                            className="px-2.5 py-1 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] hover:border-[#7a2e4a] text-[11px] font-semibold text-[#7a2e4a] dark:text-[#d77a9c] whitespace-nowrap"
-                          >
-                            Record Paid
-                          </button>
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSection("salon-stock");
+                                setSalonQuery(s.name);
+                              }}
+                              title="Check Stock & Restock Alert"
+                              className="px-2 py-1 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] hover:border-amber-500 text-[11px] font-semibold text-amber-700 dark:text-amber-400 whitespace-nowrap"
+                            >
+                              Stock Alert
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openRecordPaymentModal(s.id, s.outstanding_balance)}
+                              className="px-2.5 py-1 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] hover:border-[#7a2e4a] text-[11px] font-semibold text-[#7a2e4a] dark:text-[#d77a9c] whitespace-nowrap"
+                            >
+                              Record Paid
+                            </button>
+                          </div>
                         </td>
                       )}
                     </tr>

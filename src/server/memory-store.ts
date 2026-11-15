@@ -12,6 +12,7 @@ import {
   RpcError,
   type BootstrapPayload,
   type BulkSalonInput,
+  type CashLedgerEntry,
   type CreateShopOrderInput,
   type DeliveryNotificationResult,
   type DeliveryOrderFull,
@@ -41,6 +42,7 @@ export class MemoryKiranRepository implements KiranRepository {
   private counts = new Map<string, { id: string; repId: string; count: number; at: string }>();
   private visits: VisitRecord[] = [];
   private payments: PaymentRecord[] = [];
+  private cashLedgerEntries: CashLedgerEntry[] = [];
   private orderCards: OrderCardRecord[] = [];
   private lostDemand: LostDemandRecord[] = [];
   private shopOrders: PublicShopOrder[] = [];
@@ -111,6 +113,47 @@ export class MemoryKiranRepository implements KiranRepository {
         reversed: false,
         mayReverse: true,
         capturedAt: "2026-11-05T14:50:00Z",
+      },
+    );
+
+    this.cashLedgerEntries.push(
+      {
+        id: "cle-seed-02",
+        entryNumber: "CLE-2026-0002",
+        entryType: "bank_transfer",
+        amountPkr: 32000,
+        balanceAfterPkr: 50500,
+        referenceType: "payment",
+        referenceId: "pay-seed-01",
+        salonId: "sal-clifton-01",
+        salonName: "Toni&Guy Clifton Branch",
+        actorId: "mgr-karachi-hq-01",
+        actorName: "Tariq Mahmood (Office Manager)",
+        actorRole: "manager",
+        status: "approved",
+        bankName: "Meezan Bank",
+        bankReference: "IBFT-884201",
+        receiptNumber: "R-26-000001",
+        notes: "Bank-to-Bank verified via Meezan Bank IBFT",
+        createdAt: "2026-11-08T09:45:00Z",
+      },
+      {
+        id: "cle-seed-01",
+        entryNumber: "CLE-2026-0001",
+        entryType: "settlement",
+        amountPkr: 18500,
+        balanceAfterPkr: 18500,
+        referenceType: "payment",
+        referenceId: "pay-seed-02",
+        salonId: "sal-saddar-03",
+        salonName: "Karachi Looks Beauty Lounge",
+        actorId: "mgr-karachi-hq-01",
+        actorName: "Tariq Mahmood (Office Manager)",
+        actorRole: "manager",
+        status: "approved",
+        receiptNumber: "R-26-000002",
+        notes: "Cash-to-Cash handover recorded at head office",
+        createdAt: "2026-11-05T14:50:00Z",
       },
     );
 
@@ -514,6 +557,7 @@ export class MemoryKiranRepository implements KiranRepository {
       pendingOrderCards: clone(this.orderCards.filter((c) => c.status === "pending_approval")),
       shifts: clone(this.shifts),
       recentPayments: clone(this.payments),
+      cashLedgerEntries: clone(this.cashLedgerEntries),
       salons: clone(this.salons),
       shopOrders: clone(this.shopOrders),
       deliveryOrders: clone(this.orders),
@@ -768,6 +812,33 @@ export class MemoryKiranRepository implements KiranRepository {
           mayReverse: true,
           capturedAt: recordedAt,
         });
+
+        const prevBalance = this.cashLedgerEntries.length > 0 ? this.cashLedgerEntries[0].balanceAfterPkr : 0;
+        const newBalance = prevBalance + amount;
+        this.cashLedgerEntries.unshift({
+          id: `cle-${Date.now()}-${seq}`,
+          entryNumber: `CLE-2026-${String(this.cashLedgerEntries.length + 1).padStart(4, "0")}`,
+          entryType: method === "bank_transfer" ? "bank_transfer" : "settlement",
+          amountPkr: amount,
+          balanceAfterPkr: newBalance,
+          referenceType: "payment",
+          referenceId: `pay-${Date.now()}-${seq}`,
+          salonId: salon.id,
+          salonName: salon.name,
+          actorId: actor?.id ?? "mgr-karachi-hq-01",
+          actorName: actor?.fullName ?? "Tariq Mahmood (Office Manager)",
+          actorRole,
+          status: "approved",
+          bankName,
+          bankReference,
+          receiptNumber,
+          notes:
+            method === "bank_transfer"
+              ? `Bank-to-Bank settlement via ${bankName} (${bankReference})`
+              : "Cash-to-Cash settlement at office",
+          createdAt: recordedAt,
+        });
+
         salon.outstanding_balance = Math.max(0, salon.outstanding_balance - amount);
         for (const stop of this.route) {
           if (stop.salon_id === salon.id) {
@@ -809,6 +880,35 @@ export class MemoryKiranRepository implements KiranRepository {
         payment.reversalReason = reason;
         payment.reversedAt = new Date().toISOString();
         payment.mayReverse = false;
+
+        // Mark corresponding cash ledger entry as reversed and append reversal entry
+        const matchedEntry = this.cashLedgerEntries.find((e) => e.referenceId === payment.id);
+        if (matchedEntry) {
+          matchedEntry.status = "reversed";
+        }
+        const prevBal = this.cashLedgerEntries.length > 0 ? this.cashLedgerEntries[0].balanceAfterPkr : 0;
+        const newBal = Math.max(0, prevBal - payment.amount);
+        this.cashLedgerEntries.unshift({
+          id: `cle-rev-${Date.now()}`,
+          entryNumber: `CLE-2026-${String(this.cashLedgerEntries.length + 1).padStart(4, "0")}`,
+          entryType: "reversal",
+          amountPkr: -payment.amount,
+          balanceAfterPkr: newBal,
+          referenceType: "reversal",
+          referenceId: payment.id,
+          salonId: payment.salonId,
+          salonName: payment.salonName,
+          actorId: actor?.id ?? "mgr-karachi-hq-01",
+          actorName: actor?.fullName ?? "Office Manager",
+          actorRole: actor?.role === "owner" ? "owner" : "manager",
+          status: "reversed",
+          bankName: payment.bankName,
+          bankReference: payment.bankReference,
+          receiptNumber: payment.receiptNumber,
+          notes: `Reversed: ${reason}`,
+          createdAt: new Date().toISOString(),
+        });
+
         const salon = this.salons.find((s) => s.id === payment.salonId);
         if (salon) {
           salon.outstanding_balance += payment.amount;
@@ -946,5 +1046,9 @@ export class MemoryKiranRepository implements KiranRepository {
     };
     this.skus.push(created);
     return clone(created);
+  }
+
+  async listCashLedgerEntries(): Promise<CashLedgerEntry[]> {
+    return clone(this.cashLedgerEntries);
   }
 }

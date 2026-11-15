@@ -11,6 +11,7 @@ import {
 } from "./supabase";
 import type {
   BootstrapPayload,
+  CashLedgerEntry,
   DeliveryOrderFull,
   LostDemandRecord,
   ManagerApprovalAction,
@@ -615,6 +616,71 @@ export function mapPaymentRowsToRecords(
           ? p.reversed_at
           : reversal?.reversed_at ?? null,
       mayReverse,
+    };
+  });
+}
+
+export function mapCashLedgerRowsToEntries(
+  rows: Array<Record<string, unknown>>,
+  salonNames: Map<string, string>,
+  actorNames?: Map<string, string>,
+): CashLedgerEntry[] {
+  return rows.map((r, idx) => {
+    const id = String(r.id ?? `cle-${idx}`);
+    const entryNumber = String(r.entry_number ?? `CLE-2026-${String(idx + 1).padStart(4, "0")}`);
+    const entryTypeRaw = String(r.entry_type ?? "settlement");
+    const entryType: CashLedgerEntry["entryType"] =
+      entryTypeRaw === "bank_transfer" ||
+      entryTypeRaw === "cash_collection" ||
+      entryTypeRaw === "reversal" ||
+      entryTypeRaw === "expense"
+        ? (entryTypeRaw as CashLedgerEntry["entryType"])
+        : "settlement";
+
+    const refTypeRaw = String(r.reference_type ?? "payment");
+    const referenceType: CashLedgerEntry["referenceType"] =
+      refTypeRaw === "receipt" || refTypeRaw === "reversal" || refTypeRaw === "handover"
+        ? (refTypeRaw as CashLedgerEntry["referenceType"])
+        : "payment";
+
+    const referenceId = String(r.reference_id ?? "");
+    const salonId = typeof r.salon_id === "string" ? r.salon_id : undefined;
+    const salonName = salonId
+      ? salonNames.get(salonId)
+      : typeof r.salon_name === "string"
+        ? r.salon_name
+        : undefined;
+    const actorId = typeof r.actor_id === "string" ? r.actor_id : undefined;
+    const actorName = actorId
+      ? actorNames?.get(actorId)
+      : typeof r.actor_name === "string"
+        ? r.actor_name
+        : undefined;
+
+    const statusRaw = String(r.status ?? "approved");
+    const status: CashLedgerEntry["status"] =
+      statusRaw === "pending" || statusRaw === "verified" || statusRaw === "reversed"
+        ? (statusRaw as CashLedgerEntry["status"])
+        : "approved";
+
+    return {
+      id,
+      entryNumber,
+      entryType,
+      amountPkr: paisaToPkr(r.amount_paisa as number | string | undefined),
+      balanceAfterPkr: paisaToPkr(r.balance_after_paisa as number | string | undefined),
+      referenceType,
+      referenceId,
+      salonId,
+      salonName,
+      actorId,
+      actorName,
+      status,
+      bankName: typeof r.bank_name === "string" ? r.bank_name : null,
+      bankReference: typeof r.bank_reference === "string" ? r.bank_reference : null,
+      receiptNumber: typeof r.receipt_number === "string" ? r.receipt_number : null,
+      notes: typeof r.notes === "string" ? r.notes : null,
+      createdAt: String(r.created_at ?? new Date().toISOString()),
     };
   });
 }
@@ -1239,11 +1305,45 @@ export async function fetchLiveManagerOverview(
     .filter((p) => !p.reversed)
     .reduce((sum, p) => sum + p.amount, 0);
 
+  let runningPkr = 0;
+  const sortedPaymentsAsc = [...recentPayments].sort(
+    (a, b) => new Date(a.capturedAt).getTime() - new Date(b.capturedAt).getTime(),
+  );
+  const ledgerEntriesMap = new Map<string, number>();
+  for (const p of sortedPaymentsAsc) {
+    if (!p.reversed) {
+      runningPkr += p.amount;
+    }
+    ledgerEntriesMap.set(p.id, runningPkr);
+  }
+
+  const cashLedgerEntries: CashLedgerEntry[] = recentPayments.map((p, idx) => ({
+    id: p.id,
+    entryNumber: `CLE-2026-${String(recentPayments.length - idx).padStart(4, "0")}`,
+    entryType: p.method.includes("bank") ? ("bank_transfer" as const) : ("settlement" as const),
+    amountPkr: p.amount,
+    balanceAfterPkr: ledgerEntriesMap.get(p.id) ?? p.amount,
+    referenceType: "payment" as const,
+    referenceId: p.id,
+    salonId: p.salonId,
+    salonName: p.salonName,
+    actorId: p.repId,
+    actorName: p.recordedByName || "Office Manager",
+    actorRole: p.recordedByRole,
+    status: p.reversed ? ("reversed" as const) : ("approved" as const),
+    bankName: p.bankName,
+    bankReference: p.bankReference,
+    receiptNumber: p.receiptNumber,
+    notes: p.reversalReason ? `Reversed: ${p.reversalReason}` : "Off-app settlement approved",
+    createdAt: p.capturedAt,
+  }));
+
   return {
     pendingSalons,
     pendingOrderCards,
     shifts,
     recentPayments,
+    cashLedgerEntries,
     salons,
     shopOrders: [] as PublicShopOrder[],
     deliveryOrders,
@@ -1595,5 +1695,84 @@ export async function bulkImportLiveSalons(
     created += 1;
   }
   return created;
+}
+
+export async function fetchLiveCashLedgerEntries(limit = 100): Promise<CashLedgerEntry[]> {
+  const client = await requireClient();
+  const { data, error } = await client
+    .from("cash_ledger_entry")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error || !Array.isArray(data) || data.length === 0) {
+    const { data: payRows } = await client
+      .from("payment")
+      .select("id, recorded_by, recorded_by_role, salon_id, method, amount_paisa, bank_name, bank_reference, recorded_at")
+      .order("recorded_at", { ascending: false })
+      .limit(limit);
+
+    if (Array.isArray(payRows) && payRows.length > 0) {
+      const salonIds = Array.from(new Set(payRows.map((p) => String(p.salon_id ?? "")).filter(Boolean)));
+      const payIds = payRows.map((p) => String(p.id ?? "")).filter(Boolean);
+      const actorIds = Array.from(new Set(payRows.map((p) => String(p.recorded_by ?? "")).filter(Boolean)));
+
+      const [salonRes, rcpRes, revRes, actorRes] = await Promise.all([
+        salonIds.length > 0 ? client.from("salon").select("id, name").in("id", salonIds) : Promise.resolve({ data: [] }),
+        payIds.length > 0 ? client.from("receipt").select("payment_id, number").in("payment_id", payIds) : Promise.resolve({ data: [] }),
+        payIds.length > 0 ? client.from("payment_reversal").select("payment_id, reason, reversed_at").in("payment_id", payIds) : Promise.resolve({ data: [] }),
+        actorIds.length > 0 ? client.from("user_profile").select("id, full_name").in("id", actorIds) : Promise.resolve({ data: [] }),
+      ]);
+
+      const salonNames = new Map((salonRes.data ?? []).map((s: { id: string; name: string }) => [s.id, s.name]));
+      const receiptNumbers = new Map((rcpRes.data ?? []).map((r: { payment_id: string; number: string }) => [r.payment_id, r.number]));
+      const reversals = new Map((revRes.data ?? []).map((rv: { payment_id: string; reason: string }) => [rv.payment_id, rv.reason]));
+      const actorNames = new Map((actorRes.data ?? []).map((u: { id: string; full_name: string }) => [u.id, u.full_name]));
+
+      let runningPaisa = 0;
+      const sortedAsc = [...payRows].sort((a, b) => new Date(String(a.recorded_at)).getTime() - new Date(String(b.recorded_at)).getTime());
+      const entries: CashLedgerEntry[] = [];
+
+      for (let i = 0; i < sortedAsc.length; i++) {
+        const p = sortedAsc[i];
+        const isReversed = reversals.has(String(p.id));
+        const amtPaisa = Number(p.amount_paisa ?? 0);
+        runningPaisa += isReversed ? 0 : amtPaisa;
+        const entryType = String(p.method).includes("bank") ? "bank_transfer" : "settlement";
+        entries.push({
+          id: String(p.id),
+          entryNumber: `CLE-2026-${String(i + 1).padStart(4, "0")}`,
+          entryType,
+          amountPkr: paisaToPkr(amtPaisa),
+          balanceAfterPkr: paisaToPkr(runningPaisa),
+          referenceType: "payment",
+          referenceId: String(p.id),
+          salonId: String(p.salon_id ?? ""),
+          salonName: salonNames.get(String(p.salon_id ?? "")) ?? "Salon Client",
+          actorId: String(p.recorded_by ?? ""),
+          actorName: actorNames.get(String(p.recorded_by ?? "")) ?? "Office Manager",
+          status: isReversed ? "reversed" : "approved",
+          bankName: typeof p.bank_name === "string" ? p.bank_name : null,
+          bankReference: typeof p.bank_reference === "string" ? p.bank_reference : null,
+          receiptNumber: receiptNumbers.get(String(p.id)) ?? null,
+          notes: isReversed ? `Reversal: ${reversals.get(String(p.id))}` : `Settlement verified by Office Manager`,
+          createdAt: String(p.recorded_at ?? new Date().toISOString()),
+        });
+      }
+      return entries.reverse();
+    }
+    return [];
+  }
+
+  const salonIds = Array.from(new Set(data.map((d) => String(d.salon_id ?? "")).filter(Boolean)));
+  const actorIds = Array.from(new Set(data.map((d) => String(d.actor_id ?? "")).filter(Boolean)));
+  const [salonRes, actorRes] = await Promise.all([
+    salonIds.length > 0 ? client.from("salon").select("id, name").in("id", salonIds) : Promise.resolve({ data: [] }),
+    actorIds.length > 0 ? client.from("user_profile").select("id, full_name").in("id", actorIds) : Promise.resolve({ data: [] }),
+  ]);
+  const salonNames = new Map((salonRes.data ?? []).map((s: { id: string; name: string }) => [s.id, s.name]));
+  const actorNames = new Map((actorRes.data ?? []).map((u: { id: string; full_name: string }) => [u.id, u.full_name]));
+
+  return mapCashLedgerRowsToEntries(data, salonNames, actorNames);
 }
 

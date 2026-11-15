@@ -46,6 +46,7 @@ import {
 } from "../lib/supabase.ts";
 import {
   ensureUuid,
+  mapCashLedgerRowsToEntries,
   mapCatalogueRowsToSkus,
   mapLiveSessionToUserProfile,
   mapOrderRowsToDeliveryOrders,
@@ -58,6 +59,10 @@ import {
   pkrToPaisa,
   SupabaseRpcError,
 } from "../lib/supabase-kiran.ts";
+import {
+  computeSalonStockForecasts,
+  filterSalonStockForecasts,
+} from "../lib/salon-stock-forecast.ts";
 
 const repUser: UserProfile = {
   id: "rep-karachi-pilot-01",
@@ -1297,6 +1302,177 @@ test("supabase-kiran.ts enforces off-app payment governance, MFA flag, and maps 
   assert.equal(payments[0]?.amount, 15000);
   assert.equal(payments[0]?.bankName, "Meezan Bank");
   assert.equal(payments[0]?.mayReverse, false); // manager cannot reverse self-recorded payment
+});
+
+test("Manager cash ledger tracks append-only entries, running balance, and reversals", async () => {
+  const repo = new MemoryKiranRepository();
+
+  const initialEntries = await repo.listCashLedgerEntries();
+  assert.ok(initialEntries.length >= 2, "Expected initial seeded cash ledger entries");
+  const baselineBal = initialEntries[0].balanceAfterPkr;
+  assert.ok(baselineBal > 0);
+
+  // Manager records Bank-to-Bank settlement
+  const payRes = await repo.handleManagerApproval(
+    {
+      action: "record_office_payment",
+      salonId: "sal-clifton-01",
+      method: "bank_transfer",
+      amountPkr: 12000,
+      bankName: "Habib Bank Limited",
+      bankReference: "HBL-IBFT-772910",
+    },
+    managerUser,
+  );
+  assert.ok(payRes.ok);
+
+  const updatedEntries = await repo.listCashLedgerEntries();
+  const latestEntry = updatedEntries[0];
+  assert.equal(latestEntry.entryType, "bank_transfer");
+  assert.equal(latestEntry.amountPkr, 12000);
+  assert.equal(latestEntry.bankName, "Habib Bank Limited");
+  assert.equal(latestEntry.bankReference, "HBL-IBFT-772910");
+  assert.equal(latestEntry.balanceAfterPkr, baselineBal + 12000);
+  assert.equal(latestEntry.status, "approved");
+
+  // Owner reverses the payment with reason
+  const overview = await repo.getManagerOverview(ownerUser);
+  const targetPayment = overview.recentPayments[0];
+  assert.ok(targetPayment);
+
+  const revRes = await repo.handleManagerApproval(
+    {
+      action: "reverse_office_payment",
+      paymentId: targetPayment.id,
+      reason: "Cheque / IBFT mismatch verification reversal",
+    },
+    ownerUser,
+  );
+  assert.ok(revRes.ok);
+
+  const entriesAfterRev = await repo.listCashLedgerEntries();
+  const revEntry = entriesAfterRev[0];
+  assert.equal(revEntry.entryType, "reversal");
+  assert.equal(revEntry.amountPkr, -12000);
+  assert.equal(revEntry.balanceAfterPkr, baselineBal);
+  assert.equal(revEntry.status, "reversed");
+
+  // Test raw Supabase mapper mapCashLedgerRowsToEntries
+  const mapped = mapCashLedgerRowsToEntries(
+    [
+      {
+        id: "cle-raw-1",
+        entry_number: "CLE-2026-9001",
+        entry_type: "bank_transfer",
+        amount_paisa: 2500000,
+        balance_after_paisa: 7550000,
+        reference_type: "payment",
+        reference_id: "pay-raw-1",
+        salon_id: "sal-raw-1",
+        actor_id: managerUser.id,
+        status: "approved",
+        bank_name: "Standard Chartered",
+        bank_reference: "SCB-99882",
+        receipt_number: "R-26-000888",
+        created_at: "2026-11-15T10:00:00Z",
+      },
+    ],
+    new Map([["sal-raw-1", "Peng's Studio"]]),
+    new Map([[managerUser.id, "Sana Tariq"]]),
+  );
+
+  assert.equal(mapped[0]?.entryNumber, "CLE-2026-9001");
+  assert.equal(mapped[0]?.amountPkr, 25000);
+  assert.equal(mapped[0]?.balanceAfterPkr, 75500);
+  assert.equal(mapped[0]?.salonName, "Peng's Studio");
+  assert.equal(mapped[0]?.actorName, "Sana Tariq");
+});
+
+test("Client salon stock forecasting alerts manager proactively on cadence and depletion", () => {
+  const salons: SalonWithApproval[] = [
+    {
+      id: "sal-clifton-01",
+      name: "Toni&Guy Clifton Branch",
+      area: "Clifton Block 4",
+      address: "Zamzama Lane",
+      phone: "0300-8234190",
+      contact_person: "Rashid Ali",
+      stage: "vip",
+      outstanding_balance: 45000,
+      credit_limit: 150000,
+      last_visited_at: "2026-11-08T09:30:00Z",
+      notes_count: 4,
+      open_cards_count: 0,
+    },
+    {
+      id: "sal-dha-02",
+      name: "Peng's Hair Studio DHA",
+      area: "DHA Phase 5",
+      address: "Badar Commercial",
+      phone: "0321-9876543",
+      contact_person: "Madam Farida",
+      stage: "regular",
+      outstanding_balance: 28500,
+      credit_limit: 80000,
+      last_visited_at: "2026-11-14T11:00:00Z",
+      notes_count: 2,
+      open_cards_count: 0,
+    },
+  ];
+
+  // Delivery orders: Toni&Guy delivered 11 days ago (cadence is 10 days for VIP -> critical alert expected!)
+  const deliveries: DeliveryOrderFull[] = [
+    {
+      id: "ord-del-1",
+      order_number: "ORD-2026-001",
+      salon_id: "sal-clifton-01",
+      salon_name: "Toni&Guy Clifton Branch",
+      status: "delivered",
+      delivered_at: "2026-11-04T10:00:00Z", // 11 days before reference date
+      total_amount: 45000,
+      items: [
+        { sku_name: "Lumex Keratin Infusion Treatment 1L", qty: 10, price: 4500 },
+      ],
+    },
+    {
+      id: "ord-del-2",
+      order_number: "ORD-2026-002",
+      salon_id: "sal-dha-02",
+      salon_name: "Peng's Hair Studio DHA",
+      status: "delivered",
+      delivered_at: "2026-11-13T10:00:00Z", // 2 days before reference date -> healthy!
+      total_amount: 16000,
+      items: [
+        { sku_name: "Mocheqi Musk Smoothing Shampoo 750ml", qty: 8, price: 2000 },
+      ],
+    },
+  ];
+
+  const forecasts = computeSalonStockForecasts(
+    salons,
+    deliveries,
+    INITIAL_SKUS,
+    new Date("2026-11-15T12:00:00Z"),
+  );
+
+  assert.equal(forecasts.length, 2);
+
+  const toniGuy = forecasts.find((f) => f.salonId === "sal-clifton-01");
+  assert.ok(toniGuy);
+  assert.equal(toniGuy.restockAlertLevel, "critical");
+  assert.ok(toniGuy.estimatedDepletionDays <= 3);
+  assert.ok(toniGuy.alertReason.includes("depleted") || toniGuy.alertReason.includes("cadence"));
+  assert.ok(toniGuy.recommendedAction.includes("Rashid Ali"));
+
+  const pengs = forecasts.find((f) => f.salonId === "sal-dha-02");
+  assert.ok(pengs);
+  assert.equal(pengs.restockAlertLevel, "healthy");
+  assert.ok(pengs.estimatedDepletionDays > 5);
+
+  // Test filter helper
+  const criticalOnly = filterSalonStockForecasts(forecasts, { alertLevel: "critical" });
+  assert.equal(criticalOnly.length, 1);
+  assert.equal(criticalOnly[0].salonName, "Toni&Guy Clifton Branch");
 });
 
 

@@ -6,6 +6,7 @@ import {
   RpcError,
   type BootstrapPayload,
   type BulkSalonInput,
+  type CashLedgerEntry,
   type CreateShopOrderInput,
   type DeliveryNotificationResult,
   type DeliveryOrderFull,
@@ -977,5 +978,67 @@ export class SupabaseKiranRepository implements KiranRepository {
       recommended_use: clean.recommended_use,
       image_key: clean.image_key,
     };
+  }
+
+  async listCashLedgerEntries(): Promise<CashLedgerEntry[]> {
+    const { data: rows, error } = await this.client
+      .from("cash_ledger_entry")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(100);
+
+    if (error || !Array.isArray(rows) || rows.length === 0) {
+      // Fallback from payment rows
+      const { data: payRows } = await this.client
+        .from("payment")
+        .select("id, recorded_by, recorded_by_role, salon_id, method, amount_paisa, bank_name, bank_reference, recorded_at")
+        .order("recorded_at", { ascending: false })
+        .limit(100);
+
+      if (Array.isArray(payRows) && payRows.length > 0) {
+        let running = 0;
+        const sorted = [...payRows].reverse();
+        return sorted.map((p, idx) => {
+          const amt = Math.round(Number(p.amount_paisa ?? 0) / 100);
+          running += amt;
+          return {
+            id: String(p.id),
+            entryNumber: `CLE-2026-${String(idx + 1).padStart(4, "0")}`,
+            entryType: String(p.method).includes("bank") ? ("bank_transfer" as const) : ("settlement" as const),
+            amountPkr: amt,
+            balanceAfterPkr: running,
+            referenceType: "payment" as const,
+            referenceId: String(p.id),
+            salonId: String(p.salon_id ?? ""),
+            actorId: String(p.recorded_by ?? ""),
+            status: "approved" as const,
+            bankName: typeof p.bank_name === "string" ? p.bank_name : null,
+            bankReference: typeof p.bank_reference === "string" ? p.bank_reference : null,
+            createdAt: String(p.recorded_at ?? new Date().toISOString()),
+          };
+        }).reverse();
+      }
+      return [];
+    }
+
+    return rows.map((r, idx) => ({
+      id: String(r.id ?? `cle-${idx}`),
+      entryNumber: String(r.entry_number ?? `CLE-2026-${String(idx + 1).padStart(4, "0")}`),
+      entryType: String(r.entry_type ?? "settlement") as CashLedgerEntry["entryType"],
+      amountPkr: Math.round(Number(r.amount_paisa ?? 0) / 100),
+      balanceAfterPkr: Math.round(Number(r.balance_after_paisa ?? 0) / 100),
+      referenceType: String(r.reference_type ?? "payment") as CashLedgerEntry["referenceType"],
+      referenceId: String(r.reference_id ?? ""),
+      salonId: typeof r.salon_id === "string" ? r.salon_id : undefined,
+      salonName: typeof r.salon_name === "string" ? r.salon_name : undefined,
+      actorId: typeof r.actor_id === "string" ? r.actor_id : undefined,
+      actorName: typeof r.actor_name === "string" ? r.actor_name : undefined,
+      status: String(r.status ?? "approved") as CashLedgerEntry["status"],
+      bankName: typeof r.bank_name === "string" ? r.bank_name : null,
+      bankReference: typeof r.bank_reference === "string" ? r.bank_reference : null,
+      receiptNumber: typeof r.receipt_number === "string" ? r.receipt_number : null,
+      notes: typeof r.notes === "string" ? r.notes : null,
+      createdAt: String(r.created_at ?? new Date().toISOString()),
+    }));
   }
 }

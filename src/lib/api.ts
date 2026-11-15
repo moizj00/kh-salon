@@ -5,6 +5,7 @@ import {
   bulkImportLiveSalons,
   executeLiveManagerApproval,
   fetchLiveBootstrap,
+  fetchLiveCashLedgerEntries,
   fetchLiveManagerOverview,
   fetchLiveSalonActivity,
   fetchLiveUserSession,
@@ -13,6 +14,7 @@ import {
 } from "./supabase-kiran";
 import type {
   BootstrapPayload,
+  CashLedgerEntry,
   CreateShopOrderInput,
   DeliveryNotificationResult,
   ManagerApprovalAction,
@@ -210,6 +212,14 @@ export async function fetchManagerOverview(): Promise<ManagerOverviewPayload> {
     return fetchLiveManagerOverview(profile);
   }
   return apiFetch("/api/manager/overview");
+}
+
+export async function fetchCashLedgerEntries(): Promise<CashLedgerEntry[]> {
+  if (getAuthMode() === "supabase") {
+    return fetchLiveCashLedgerEntries();
+  }
+  const res = await apiFetch<{ entries: CashLedgerEntry[] }>("/api/manager/cash-ledger");
+  return res.entries;
 }
 
 export async function submitManagerApproval(

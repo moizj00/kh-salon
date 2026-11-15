@@ -68,6 +68,27 @@ export interface PaymentRecord {
   mayReverse?: boolean;
 }
 
+export interface CashLedgerEntry {
+  id: string;
+  entryNumber: string;
+  entryType: "cash_collection" | "bank_transfer" | "settlement" | "expense" | "reversal";
+  amountPkr: number;
+  balanceAfterPkr: number;
+  referenceType: "payment" | "receipt" | "reversal" | "handover";
+  referenceId: string;
+  salonId?: string;
+  salonName?: string;
+  actorId?: string;
+  actorName?: string;
+  actorRole?: UserRole;
+  status: "pending" | "verified" | "approved" | "reversed";
+  bankName?: string | null;
+  bankReference?: string | null;
+  receiptNumber?: string | null;
+  notes?: string | null;
+  createdAt: string;
+}
+
 export interface OrderCardRecord {
   id: string;
   repId: string;
@@ -150,6 +171,7 @@ export interface ManagerOverviewPayload {
   pendingOrderCards: OrderCardRecord[];
   shifts: RepShift[];
   recentPayments: PaymentRecord[];
+  cashLedgerEntries?: CashLedgerEntry[];
   salons: SalonWithApproval[];
   shopOrders: PublicShopOrder[];
   deliveryOrders: DeliveryOrderFull[];
@@ -235,4 +257,5 @@ export interface KiranRepository {
   notifyDelivery(orderId: string): Promise<DeliveryNotificationResult>;
   bulkImportSalons(salons: BulkSalonInput[], createdBy: string): Promise<number>;
   upsertCatalogSku(input: CatalogSkuInput, existingId?: string): Promise<SKU>;
+  listCashLedgerEntries(): Promise<CashLedgerEntry[]>;
 }
