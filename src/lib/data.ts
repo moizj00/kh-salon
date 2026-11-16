@@ -43,12 +43,18 @@ export type SKU = {
   product_group_id?: string;
 };
 
+export type DeliveryOrderItem = {
+  sku_name: string;
+  qty: number;
+  price: number;
+};
+
 export type DeliveryOrder = {
   id: string;
   order_number: string;
   salon_id: string;
   salon_name: string;
-  items: Array<{ sku_name: string; qty: number; price: number }>;
+  items: DeliveryOrderItem[];
   total_amount: number;
   status: "pending_delivery" | "delivered";
   delivered_at: string | null;

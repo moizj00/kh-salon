@@ -146,7 +146,15 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   }, []);
 
   const runAction = async (action: ManagerApprovalAction) => {
-    setBusyId("id" in action ? action.id : action.ids[0] ?? null);
+    setBusyId(
+      "id" in action
+        ? action.id
+        : "ids" in action
+          ? (action.ids[0] ?? null)
+          : "paymentId" in action
+            ? action.paymentId
+            : action.salonId,
+    );
     try {
       const res = await submitManagerApproval(action);
       showToast(res.message, "ok");

@@ -212,7 +212,7 @@ export const SalonRestockAlerts: React.FC<SalonRestockAlertsProps> = ({
                 {metrics.criticalCount} {metrics.criticalCount === 1 ? "Salon" : "Salons"} Near Depletion — Immediate Call Recommended
               </div>
               <p className="text-xs text-amber-800 dark:text-amber-300/90 mt-0.5">
-                Stylist inventory has dropped to $\le 3$ days remaining based on order cadence. Proactive follow-up prevents salon stockout and lost treatment revenue.
+                Stylist inventory has dropped to ≤ 3 days remaining based on order cadence. Proactive follow-up prevents salon stockout and lost treatment revenue.
               </p>
             </div>
           </div>
@@ -248,7 +248,7 @@ export const SalonRestockAlerts: React.FC<SalonRestockAlertsProps> = ({
             {metrics.criticalCount}
           </div>
           <div className="text-[11px] text-red-600 dark:text-red-400 mt-0.5">
-            Depletion in $\le 3$ days · call stylist now
+            Depletion in ≤ 3 days · call stylist now
           </div>
         </div>
 

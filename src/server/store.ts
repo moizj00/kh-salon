@@ -68,6 +68,9 @@ class ResilientKiranRepository implements KiranRepository {
 
   upsertCatalogSku: KiranRepository["upsertCatalogSku"] = (input, existingId) =>
     this.run((repo) => repo.upsertCatalogSku(input, existingId));
+
+  listCashLedgerEntries: KiranRepository["listCashLedgerEntries"] = () =>
+    this.run((repo) => repo.listCashLedgerEntries());
 }
 
 export function getRepository(): KiranRepository {

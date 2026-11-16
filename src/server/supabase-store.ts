@@ -989,11 +989,15 @@ export class SupabaseKiranRepository implements KiranRepository {
 
     if (error || !Array.isArray(rows) || rows.length === 0) {
       // Fallback from payment rows
-      const { data: payRows } = await this.client
+      const { data: payRows, error: payErr } = await this.client
         .from("payment")
         .select("id, recorded_by, recorded_by_role, salon_id, method, amount_paisa, bank_name, bank_reference, recorded_at")
         .order("recorded_at", { ascending: false })
         .limit(100);
+
+      if (payErr) {
+        throw this.wrapDbError(error ?? payErr);
+      }
 
       if (Array.isArray(payRows) && payRows.length > 0) {
         let running = 0;
@@ -1017,6 +1021,9 @@ export class SupabaseKiranRepository implements KiranRepository {
             createdAt: String(p.recorded_at ?? new Date().toISOString()),
           };
         }).reverse();
+      }
+      if (error) {
+        throw this.wrapDbError(error);
       }
       return [];
     }

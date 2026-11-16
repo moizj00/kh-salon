@@ -821,14 +821,16 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => setWorkspaceMode(workspaceMode === "rep" ? "manager" : "rep")}
-              className="px-3 py-1.5 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold flex items-center gap-1.5 hover:border-[#7a2e4a] whitespace-nowrap"
-            >
-              <Briefcase className="w-3.5 h-3.5 text-[#7a2e4a] dark:text-[#d77a9c]" />
-              <span>{workspaceMode === "rep" ? "Office Manager" : "Field Rep"}</span>
-            </button>
+            {canManageCatalog(user.role) && (
+              <button
+                type="button"
+                onClick={() => setWorkspaceMode(workspaceMode === "rep" ? "manager" : "rep")}
+                className="px-3 py-1.5 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold flex items-center gap-1.5 hover:border-[#7a2e4a] whitespace-nowrap"
+              >
+                <Briefcase className="w-3.5 h-3.5 text-[#7a2e4a] dark:text-[#d77a9c]" />
+                <span>{workspaceMode === "rep" ? "Office Manager" : "Field Rep"}</span>
+              </button>
+            )}
 
             <PWAInstallButton />
 
@@ -910,7 +912,7 @@ export default function App() {
           </div>
         )}
 
-        {workspaceMode === "manager" ? (
+        {workspaceMode === "manager" && canManageCatalog(user.role) ? (
           <ManagerDashboard
             showToast={showToast}
             userRole={user.role}

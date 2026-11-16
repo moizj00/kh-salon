@@ -793,11 +793,12 @@ export class MemoryKiranRepository implements KiranRepository {
           }
         }
         const seq = this.payments.length + 1;
+        const paymentId = `pay-${Date.now()}-${seq}`;
         const receiptNumber = `R-26-${String(seq).padStart(6, "0")}`;
         const recordedAt = new Date().toISOString();
         const actorRole: UserProfile["role"] = actor?.role === "owner" ? "owner" : "manager";
         this.payments.unshift({
-          id: `pay-${Date.now()}-${seq}`,
+          id: paymentId,
           repId: actor?.id ?? "mgr-karachi-hq-01",
           salonId: salon.id,
           salonName: salon.name,
@@ -822,7 +823,7 @@ export class MemoryKiranRepository implements KiranRepository {
           amountPkr: amount,
           balanceAfterPkr: newBalance,
           referenceType: "payment",
-          referenceId: `pay-${Date.now()}-${seq}`,
+          referenceId: paymentId,
           salonId: salon.id,
           salonName: salon.name,
           actorId: actor?.id ?? "mgr-karachi-hq-01",
