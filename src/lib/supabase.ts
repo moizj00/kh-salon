@@ -17,7 +17,8 @@ let inflightRegister: Promise<{ error: unknown }> | null = null;
 
 function readEnvConfigSync(): SupabasePublicConfig {
   const metaEnv =
-    typeof import.meta !== "undefined" && (import.meta as unknown as { env?: Record<string, string | undefined> }).env
+    typeof import.meta !== "undefined" &&
+    (import.meta as unknown as { env?: Record<string, string | undefined> }).env
       ? (import.meta as unknown as { env: Record<string, string | undefined> }).env
       : {};
   const nodeEnv = typeof process !== "undefined" && process.env ? process.env : {};
@@ -43,7 +44,7 @@ function readEnvConfigSync(): SupabasePublicConfig {
 
 /**
  * Resolves public Supabase URL & anon key from Vite env vars first,
- * falling back to the Express server `/api/auth/config` endpoint when running in browser.
+ * falling back to `/api/auth/config` in the browser.
  * Never reads or exposes SUPABASE_SERVICE_ROLE_KEY.
  */
 export async function resolveSupabaseConfig(): Promise<SupabasePublicConfig> {
@@ -68,7 +69,8 @@ export async function resolveSupabaseConfig(): Promise<SupabasePublicConfig> {
         const json = (await res.json()) as Partial<SupabasePublicConfig>;
         return {
           supabaseUrl: typeof json.supabaseUrl === "string" ? json.supabaseUrl.trim() : "",
-          supabaseAnonKey: typeof json.supabaseAnonKey === "string" ? json.supabaseAnonKey.trim() : "",
+          supabaseAnonKey:
+            typeof json.supabaseAnonKey === "string" ? json.supabaseAnonKey.trim() : "",
         };
       })
       .catch(() => ({ supabaseUrl: "", supabaseAnonKey: "" }))
@@ -126,6 +128,7 @@ export function createConfiguredSupabaseClient(
 ): SupabaseClient {
   return createClient(supabaseUrl, supabaseAnonKey, {
     auth: {
+      flowType: "pkce",
       persistSession: true,
       autoRefreshToken: true,
       detectSessionInUrl: true,
@@ -222,7 +225,8 @@ export async function signInWithSupabaseGoogle(redirectTo?: string): Promise<str
     throw new Error("Supabase URL and anon key are not configured.");
   }
   const targetRedirect =
-    redirectTo || (typeof window !== "undefined" ? window.location.origin : "");
+    redirectTo ||
+    (typeof window !== "undefined" ? `${window.location.origin}/auth/callback` : "");
   const { data, error } = await client.auth.signInWithOAuth({
     provider: "google",
     options: {
@@ -236,7 +240,40 @@ export async function signInWithSupabaseGoogle(redirectTo?: string): Promise<str
   return data.url;
 }
 
-export async function signInWithSupabaseEmailOtp(email: string): Promise<void> {
+export async function exchangeSupabaseAuthCode(code: string): Promise<string> {
+  const client = await getSupabaseClient();
+  if (!client) {
+    throw new Error("Supabase URL and anon key are not configured.");
+  }
+  const { data, error } = await client.auth.exchangeCodeForSession(code);
+  if (error || !data.session?.access_token) {
+    throw new Error(error?.message || "Could not complete OAuth session exchange.");
+  }
+  return data.session.access_token;
+}
+
+export async function signInWithSupabasePassword(
+  email: string,
+  password: string,
+): Promise<string> {
+  const client = await getSupabaseClient();
+  if (!client) {
+    throw new Error("Supabase URL and anon key are not configured.");
+  }
+  const { data, error } = await client.auth.signInWithPassword({
+    email: email.trim().toLowerCase(),
+    password,
+  });
+  if (error || !data.session?.access_token) {
+    throw new Error(error?.message || "Invalid email or password.");
+  }
+  return data.session.access_token;
+}
+
+export async function signInWithSupabaseEmailOtp(
+  email: string,
+  shouldCreateUser = true,
+): Promise<void> {
   const client = await getSupabaseClient();
   if (!client) {
     throw new Error("Supabase URL and anon key are not configured.");
@@ -244,19 +281,19 @@ export async function signInWithSupabaseEmailOtp(email: string): Promise<void> {
   const cleanEmail = email.trim().toLowerCase();
   const { error } = await client.auth.signInWithOtp({
     email: cleanEmail,
-    options: { shouldCreateUser: false },
+    options: { shouldCreateUser },
   });
   if (error) {
     throw new Error(error.message || "Could not send verification code.");
   }
 }
 
-export async function verifySupabaseEmailOtp(email: string, token: string): Promise<void> {
+export async function verifySupabaseEmailOtp(email: string, token: string): Promise<string> {
   const client = await getSupabaseClient();
   if (!client) {
     throw new Error("Supabase URL and anon key are not configured.");
   }
-  const { error } = await client.auth.verifyOtp({
+  const { data, error } = await client.auth.verifyOtp({
     email: email.trim().toLowerCase(),
     token: token.trim(),
     type: "email",
@@ -264,6 +301,7 @@ export async function verifySupabaseEmailOtp(email: string, token: string): Prom
   if (error) {
     throw new Error(error.message || "Invalid or expired verification code.");
   }
+  return data.session?.access_token ?? "";
 }
 
 export async function signOutSupabase(): Promise<void> {
@@ -355,4 +393,3 @@ export function resetSupabaseClientForTests(): void {
   cachedClientKey = "";
   inflightRegister = null;
 }
-

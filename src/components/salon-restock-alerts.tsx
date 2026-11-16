@@ -1,21 +1,12 @@
 import React, { useMemo, useState } from "react";
 import {
   AlertTriangle,
-  ArrowRight,
   BellRing,
-  Building2,
-  Calendar,
   CheckCircle2,
   Clock,
-  ExternalLink,
-  Filter,
-  Layers,
-  Package,
   PackageCheck,
-  Phone,
   PhoneCall,
   Plus,
-  RefreshCw,
   Search,
   Sparkles,
   User,
@@ -44,6 +35,11 @@ interface SalonRestockAlertsProps {
     unitPrice: number;
     notes?: string;
   }) => Promise<void>;
+  onCreateOfficialOrder?: (order: {
+    salonId: string;
+    plan: "CASH" | "INST2" | "INST4";
+    lines: Array<{ sku_id: string; qty: number }>;
+  }) => Promise<void>;
   userRole?: UserRole;
   showToast: (msg: string, type?: "ok" | "info" | "warn") => void;
 }
@@ -53,6 +49,7 @@ export const SalonRestockAlerts: React.FC<SalonRestockAlertsProps> = ({
   deliveries,
   skus,
   onDraftRestockCard,
+  onCreateOfficialOrder,
   userRole = "manager",
   showToast,
 }) => {
@@ -62,15 +59,21 @@ export const SalonRestockAlerts: React.FC<SalonRestockAlertsProps> = ({
   const [sortBy, setSortBy] = useState<"urgency" | "name" | "stock_low_first" | "cadence">("urgency");
   const [draftModalData, setDraftModalData] = useState<{
     open: boolean;
+    mode: "card" | "official_order";
     forecast: SalonStockForecast | null;
     selectedSkuId: string;
     qty: number;
+    plan: "CASH" | "INST2" | "INST4";
+    customerConfirmed: boolean;
     notes: string;
   }>({
     open: false,
+    mode: "card",
     forecast: null,
     selectedSkuId: "",
     qty: 6,
+    plan: "CASH",
+    customerConfirmed: false,
     notes: "",
   });
   const [submittingDraft, setSubmittingDraft] = useState(false);
@@ -121,30 +124,43 @@ export const SalonRestockAlerts: React.FC<SalonRestockAlertsProps> = ({
     };
   }, [allForecasts]);
 
-  const openDraftOrderModal = (forecast: SalonStockForecast, targetSku?: SkuStockEstimate) => {
+  const isOffice = userRole === "manager" || userRole === "owner";
+
+  const openDraftOrderModal = (
+    forecast: SalonStockForecast,
+    targetSku?: SkuStockEstimate,
+    mode: "card" | "official_order" = isOffice && onCreateOfficialOrder ? "official_order" : "card",
+  ) => {
     const defaultSku = targetSku
       ? targetSku.skuId
-      : forecast.suggestedReorderSkus[0]?.skuId || forecast.skuBreakdown[0]?.skuId || "";
+      : forecast.suggestedReorderSkus[0]?.skuId || forecast.skuBreakdown[0]?.skuId || skus[0]?.id || "";
     const defaultQty = targetSku
       ? Math.max(4, targetSku.lastDeliveredQty)
       : forecast.suggestedReorderSkus[0]?.suggestedQty || 6;
 
     setDraftModalData({
       open: true,
+      mode,
       forecast,
       selectedSkuId: defaultSku,
       qty: defaultQty,
-      notes: `Proactive restock order based on ${forecast.orderFrequencyDays}-day order frequency and depleted salon stock.`,
+      plan: "CASH",
+      customerConfirmed: false,
+      notes: `Advisory restock follow-up based on ${forecast.orderFrequencyDays}-day delivery cadence.`,
     });
   };
 
   const handleConfirmDraftOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!draftModalData.forecast) return;
-    const { forecast, selectedSkuId, qty, notes } = draftModalData;
-    const selectedSku = forecast.skuBreakdown.find((s) => s.skuId === selectedSkuId);
-    if (!selectedSku) {
-      showToast("Select a SKU for the restock intake card.", "warn");
+    const { forecast, selectedSkuId, qty, notes, mode, plan, customerConfirmed } = draftModalData;
+    const fallbackSku = skus.find((s) => s.id === selectedSkuId);
+    const breakdownSku = forecast.skuBreakdown.find((s) => s.skuId === selectedSkuId);
+    const resolvedSkuName = breakdownSku?.skuName || fallbackSku?.name || "";
+    const resolvedPrice = breakdownSku?.unitPricePkr || fallbackSku?.price || 0;
+
+    if (!selectedSkuId || !resolvedSkuName) {
+      showToast("Select a valid SKU from the catalog.", "warn");
       return;
     }
     if (qty <= 0) {
@@ -154,24 +170,41 @@ export const SalonRestockAlerts: React.FC<SalonRestockAlertsProps> = ({
 
     setSubmittingDraft(true);
     try {
-      if (onDraftRestockCard) {
-        await onDraftRestockCard({
-          salonId: forecast.salonId,
-          salonName: forecast.salonName,
-          skuId: selectedSku.skuId,
-          skuName: selectedSku.skuName,
-          qty,
-          unitPrice: selectedSku.unitPricePkr,
-          notes,
-        });
+      if (mode === "official_order") {
+        if (!customerConfirmed) {
+          showToast("Confirm customer approval before creating an official sales order.", "warn");
+          setSubmittingDraft(false);
+          return;
+        }
+        if (onCreateOfficialOrder) {
+          await onCreateOfficialOrder({
+            salonId: forecast.salonId,
+            plan,
+            lines: [{ sku_id: selectedSkuId, qty }],
+          });
+          setDraftModalData((prev) => ({ ...prev, open: false }));
+          showToast(`Official sales order created for ${forecast.salonName} (${qty}x ${resolvedSkuName}).`, "ok");
+        }
+      } else {
+        if (onDraftRestockCard) {
+          await onDraftRestockCard({
+            salonId: forecast.salonId,
+            salonName: forecast.salonName,
+            skuId: selectedSkuId,
+            skuName: resolvedSkuName,
+            qty,
+            unitPrice: resolvedPrice,
+            notes,
+          });
+        }
+        setDraftModalData((prev) => ({ ...prev, open: false }));
+        showToast(
+          `Restock order request for ${forecast.salonName} (${qty}x ${resolvedSkuName}) submitted for Office review.`,
+          "ok",
+        );
       }
-      setDraftModalData((prev) => ({ ...prev, open: false }));
-      showToast(
-        `Draft restock card for ${forecast.salonName} (${qty}x ${selectedSku.skuName}) created for Office Manager approval.`,
-        "ok",
-      );
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "Failed to create restock draft.", "warn");
+      showToast(err instanceof Error ? err.message : "Failed to submit restock action.", "warn");
     } finally {
       setSubmittingDraft(false);
     }
@@ -205,7 +238,7 @@ export const SalonRestockAlerts: React.FC<SalonRestockAlertsProps> = ({
         >
           <div className="flex items-start gap-3 min-w-0">
             <div className="p-2 rounded-xl bg-amber-100 dark:bg-amber-900/50 text-amber-800 dark:text-amber-300 shrink-0">
-              <BellRing className="w-5 h-5 animate-pulse" />
+              <BellRing className="w-5 h-5" />
             </div>
             <div>
               <div className="font-bold text-sm text-amber-900 dark:text-amber-200">
@@ -443,10 +476,10 @@ export const SalonRestockAlerts: React.FC<SalonRestockAlertsProps> = ({
                     <button
                       type="button"
                       onClick={() => openDraftOrderModal(f)}
-                      className="px-3 py-1.5 rounded-xl bg-[#7a2e4a] hover:bg-[#66243d] text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors shadow-xs"
+                      className="px-3 py-1.5 rounded-xl bg-[#7a2e4a] hover:bg-[#66243d] text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
                     >
                       <Plus className="w-3.5 h-3.5" />
-                      <span>Draft Restock Card</span>
+                      <span>{isOffice && onCreateOfficialOrder ? "Create Order (Confirmed)" : "Draft Request Card"}</span>
                     </button>
                   </div>
                 </div>
@@ -504,85 +537,90 @@ export const SalonRestockAlerts: React.FC<SalonRestockAlertsProps> = ({
                   </div>
                 </div>
 
-                {/* SKU Breakdown Table */}
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs border-collapse">
-                    <thead>
-                      <tr className="border-b border-[#e6dfdb] dark:border-[#3a3330] text-[#6b625e] dark:text-[#a59b96]">
-                        <th className="py-1.5 px-2 font-medium">Product / SKU</th>
-                        <th className="py-1.5 px-2 font-medium">Brand</th>
-                        <th className="py-1.5 px-2 font-medium text-right">Last Delivered</th>
-                        <th className="py-1.5 px-2 font-medium text-right">Daily Burn</th>
-                        <th className="py-1.5 px-2 font-medium text-right">Units on Hand</th>
-                        <th className="py-1.5 px-2 font-medium text-right">Days Left</th>
-                        <th className="py-1.5 px-2 font-medium">Status</th>
-                        <th className="py-1.5 px-2 font-medium text-right">Quick Restock</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#e6dfdb] dark:divide-[#3a3330]">
-                      {f.skuBreakdown.map((sku) => {
-                        const isSkuCritical = sku.stockStatus === "critical";
-                        const isSkuWarning = sku.stockStatus === "warning";
+                {/* SKU Breakdown Table (actual delivered history only) */}
+                {!f.hasHistoricalDeliveries ? (
+                  <div className="p-3 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-xs text-[#6b625e] dark:text-[#a59b96]">
+                    No completed deliveries recorded yet for this salon. Estimated depletion starts automatically after the first official delivery.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead>
+                        <tr className="border-b border-[#e6dfdb] dark:border-[#3a3330] text-[#6b625e] dark:text-[#a59b96]">
+                          <th className="py-1.5 px-2 font-medium">Product / SKU</th>
+                          <th className="py-1.5 px-2 font-medium">Brand</th>
+                          <th className="py-1.5 px-2 font-medium text-right">Last Delivered</th>
+                          <th className="py-1.5 px-2 font-medium text-right">Daily Burn</th>
+                          <th className="py-1.5 px-2 font-medium text-right">Units on Hand</th>
+                          <th className="py-1.5 px-2 font-medium text-right">Days Left</th>
+                          <th className="py-1.5 px-2 font-medium">Status</th>
+                          <th className="py-1.5 px-2 font-medium text-right">Follow-up</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#e6dfdb] dark:divide-[#3a3330]">
+                        {f.skuBreakdown.map((sku) => {
+                          const isSkuCritical = sku.stockStatus === "critical";
+                          const isSkuWarning = sku.stockStatus === "warning";
 
-                        return (
-                          <tr key={sku.skuId} className="hover:bg-[#faf7f5]/80 dark:hover:bg-[#1a1716]">
-                            <td className="py-1.5 px-2 font-medium text-[#1d1a19] dark:text-[#f2eeec]">
-                              {sku.skuName}
-                            </td>
-                            <td className="py-1.5 px-2 text-[#6b625e] dark:text-[#a59b96]">
-                              {sku.brand}
-                            </td>
-                            <td className="py-1.5 px-2 text-right tabular-nums text-[#6b625e] dark:text-[#a59b96]">
-                              {sku.lastDeliveredQty} units
-                            </td>
-                            <td className="py-1.5 px-2 text-right tabular-nums text-[#6b625e] dark:text-[#a59b96]">
-                              {sku.dailyConsumptionRate}/day
-                            </td>
-                            <td className="py-1.5 px-2 text-right font-bold tabular-nums text-[#1d1a19] dark:text-[#f2eeec]">
-                              {sku.estimatedUnitsOnHand}
-                            </td>
-                            <td
-                              className={`py-1.5 px-2 text-right font-semibold tabular-nums ${
-                                isSkuCritical
-                                  ? "text-red-700 dark:text-red-400"
-                                  : isSkuWarning
-                                    ? "text-amber-700 dark:text-amber-300"
-                                    : "text-emerald-700 dark:text-emerald-400"
-                              }`}
-                            >
-                              {sku.daysOfStockLeft}d
-                            </td>
-                            <td className="py-1.5 px-2">
-                              {/* Zero-pill: text + subtle icon */}
-                              {isSkuCritical ? (
-                                <span className="text-red-700 dark:text-red-400 font-medium">
-                                  Critical (Low)
-                                </span>
-                              ) : isSkuWarning ? (
-                                <span className="text-amber-700 dark:text-amber-300 font-medium">
-                                  Reorder Soon
-                                </span>
-                              ) : (
-                                <span className="text-emerald-700 dark:text-emerald-400 font-medium">
-                                  Healthy
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-1.5 px-2 text-right">
-                              <button
-                                type="button"
-                                onClick={() => openDraftOrderModal(f, sku)}
-                                className="px-2 py-0.5 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] text-[11px] font-semibold text-[#7a2e4a] dark:text-[#d77a9c] hover:border-[#7a2e4a]"
+                          return (
+                            <tr key={sku.skuId} className="hover:bg-[#faf7f5]/80 dark:hover:bg-[#1a1716]">
+                              <td className="py-1.5 px-2 font-medium text-[#1d1a19] dark:text-[#f2eeec]">
+                                {sku.skuName}
+                              </td>
+                              <td className="py-1.5 px-2 text-[#6b625e] dark:text-[#a59b96]">
+                                {sku.brand}
+                              </td>
+                              <td className="py-1.5 px-2 text-right tabular-nums text-[#6b625e] dark:text-[#a59b96]">
+                                {sku.lastDeliveredQty} units
+                              </td>
+                              <td className="py-1.5 px-2 text-right tabular-nums text-[#6b625e] dark:text-[#a59b96]">
+                                {sku.dailyConsumptionRate}/day
+                              </td>
+                              <td className="py-1.5 px-2 text-right font-bold tabular-nums text-[#1d1a19] dark:text-[#f2eeec]">
+                                {sku.estimatedUnitsOnHand}
+                              </td>
+                              <td
+                                className={`py-1.5 px-2 text-right font-semibold tabular-nums ${
+                                  isSkuCritical
+                                    ? "text-red-700 dark:text-red-400"
+                                    : isSkuWarning
+                                      ? "text-amber-700 dark:text-amber-300"
+                                      : "text-emerald-700 dark:text-emerald-400"
+                                }`}
                               >
-                                + Reorder
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                                {sku.daysOfStockLeft}d
+                              </td>
+                              <td className="py-1.5 px-2">
+                                {isSkuCritical ? (
+                                  <span className="text-red-700 dark:text-red-400 font-medium">
+                                    Critical (Low)
+                                  </span>
+                                ) : isSkuWarning ? (
+                                  <span className="text-amber-700 dark:text-amber-300 font-medium">
+                                    Reorder Soon
+                                  </span>
+                                ) : (
+                                  <span className="text-emerald-700 dark:text-emerald-400 font-medium">
+                                    Healthy
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-1.5 px-2 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => openDraftOrderModal(f, sku)}
+                                  className="px-2 py-0.5 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] text-[11px] font-semibold text-[#7a2e4a] dark:text-[#d77a9c] hover:border-[#7a2e4a]"
+                                >
+                                  + Restock
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
 
                 {/* Proactive Guidance Callout */}
                 <div
@@ -611,21 +649,23 @@ export const SalonRestockAlerts: React.FC<SalonRestockAlertsProps> = ({
         )}
       </div>
 
-      {/* Draft Restock Order Intake Card Modal */}
+      {/* Advisory Restock Action Modal (Official Order w/ Customer Confirmation OR Rep Request Card) */}
       {draftModalData.open && draftModalData.forecast && (
         <div
           role="dialog"
           aria-modal="true"
-          className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-xs"
+          className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
         >
-          <div className="w-full max-w-lg rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] p-5 shadow-xl space-y-4">
+          <div className="w-full max-w-lg rounded-2xl bg-white dark:bg-[#211d1b] border border-[#e6dfdb] dark:border-[#3a3330] p-5 space-y-4">
             <div className="flex items-start justify-between gap-3 border-b border-[#e6dfdb] dark:border-[#3a3330] pb-3">
               <div>
                 <h3 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
-                  Draft Restock Order Intake Card
+                  {draftModalData.mode === "official_order"
+                    ? "Create Official Sales Order (Customer Confirmed)"
+                    : "Draft Restock Order Request Card"}
                 </h3>
                 <p className="text-xs text-[#6b625e] dark:text-[#a59b96] mt-0.5">
-                  Pre-filled order card for {draftModalData.forecast.salonName}
+                  Advisory follow-up for {draftModalData.forecast.salonName}
                 </p>
               </div>
               <button
@@ -648,7 +688,6 @@ export const SalonRestockAlerts: React.FC<SalonRestockAlertsProps> = ({
                 </div>
               </div>
 
-              {/* SKU Selection */}
               <div>
                 <label className="block font-medium text-[#1d1a19] dark:text-[#f2eeec] mb-1">
                   Product / SKU to Restock
@@ -660,24 +699,32 @@ export const SalonRestockAlerts: React.FC<SalonRestockAlertsProps> = ({
                   }
                   className="w-full px-3 py-2 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-xs text-[#1d1a19] dark:text-[#f2eeec] focus:outline-hidden focus:border-[#7a2e4a]"
                 >
-                  {draftModalData.forecast.skuBreakdown.map((s) => (
-                    <option key={s.skuId} value={s.skuId}>
-                      {s.skuName} ({s.brand}) — Est. {s.estimatedUnitsOnHand} on hand (PKR {s.unitPricePkr.toLocaleString()})
+                  {(draftModalData.forecast.skuBreakdown.length > 0
+                    ? draftModalData.forecast.skuBreakdown.map((s) => ({
+                        id: s.skuId,
+                        label: `${s.skuName} (${s.brand}) — Est. ${s.estimatedUnitsOnHand} on hand (PKR ${s.unitPricePkr.toLocaleString()})`,
+                      }))
+                    : skus.map((s) => ({
+                        id: s.id,
+                        label: `${s.name} (${s.brand || "Catalog"}) — PKR ${s.price.toLocaleString()}`,
+                      }))
+                  ).map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
                     </option>
                   ))}
                 </select>
               </div>
 
-              {/* Quantity */}
-              <div>
-                <label className="block font-medium text-[#1d1a19] dark:text-[#f2eeec] mb-1">
-                  Restock Quantity (Units)
-                </label>
-                <div className="flex items-center gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium text-[#1d1a19] dark:text-[#f2eeec] mb-1">
+                    Quantity (Units)
+                  </label>
                   <input
                     type="number"
                     min="1"
-                    max="100"
+                    max="200"
                     value={draftModalData.qty}
                     onChange={(e) =>
                       setDraftModalData((prev) => ({
@@ -685,41 +732,62 @@ export const SalonRestockAlerts: React.FC<SalonRestockAlertsProps> = ({
                         qty: Math.max(1, Number(e.target.value) || 1),
                       }))
                     }
-                    className="w-32 px-3 py-2 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-mono tabular-nums text-[#1d1a19] dark:text-[#f2eeec] focus:outline-hidden focus:border-[#7a2e4a]"
+                    className="w-full px-3 py-2 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-mono tabular-nums"
                   />
-                  <div className="flex items-center gap-1.5">
-                    {[4, 6, 8, 12].map((preset) => (
-                      <button
-                        key={preset}
-                        type="button"
-                        onClick={() => setDraftModalData((prev) => ({ ...prev, qty: preset }))}
-                        className={`px-2.5 py-1.5 rounded-lg border text-xs font-semibold tabular-nums transition-colors ${
-                          draftModalData.qty === preset
-                            ? "bg-[#7a2e4a] text-white border-[#7a2e4a]"
-                            : "border-[#e6dfdb] dark:border-[#3a3330] text-[#6b625e] hover:border-[#7a2e4a]"
-                        }`}
-                      >
-                        {preset}
-                      </button>
-                    ))}
-                  </div>
                 </div>
+
+                {draftModalData.mode === "official_order" && (
+                  <div>
+                    <label className="block font-medium text-[#1d1a19] dark:text-[#f2eeec] mb-1">
+                      Payment Plan
+                    </label>
+                    <select
+                      value={draftModalData.plan}
+                      onChange={(e) =>
+                        setDraftModalData((prev) => ({
+                          ...prev,
+                          plan: e.target.value as "CASH" | "INST2" | "INST4",
+                        }))
+                      }
+                      className="w-full px-3 py-2 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-xs"
+                    >
+                      <option value="CASH">CASH (Full on Delivery)</option>
+                      <option value="INST2">INST2 (2 Installments)</option>
+                      <option value="INST4">INST4 (4 Installments)</option>
+                    </select>
+                  </div>
+                )}
               </div>
 
-              {/* Notes */}
-              <div>
-                <label className="block font-medium text-[#1d1a19] dark:text-[#f2eeec] mb-1">
-                  Internal Notes &amp; Follow-up Context
+              {draftModalData.mode === "official_order" ? (
+                <label className="flex items-start gap-2.5 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={draftModalData.customerConfirmed}
+                    onChange={(e) =>
+                      setDraftModalData((prev) => ({ ...prev, customerConfirmed: e.target.checked }))
+                    }
+                    className="mt-0.5 accent-[#7a2e4a]"
+                  />
+                  <span className="text-amber-900 dark:text-amber-200 leading-relaxed">
+                    <strong>Customer Confirmation Required:</strong> I confirm the salon partner explicitly approved this restock quantity and pricing. Forecasts never generate official sales orders automatically.
+                  </span>
                 </label>
-                <textarea
-                  rows={2}
-                  value={draftModalData.notes}
-                  onChange={(e) =>
-                    setDraftModalData((prev) => ({ ...prev, notes: e.target.value }))
-                  }
-                  className="w-full px-3 py-2 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-xs text-[#1d1a19] dark:text-[#f2eeec] focus:outline-hidden focus:border-[#7a2e4a]"
-                />
-              </div>
+              ) : (
+                <div>
+                  <label className="block font-medium text-[#1d1a19] dark:text-[#f2eeec] mb-1">
+                    Request Notes
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={draftModalData.notes}
+                    onChange={(e) =>
+                      setDraftModalData((prev) => ({ ...prev, notes: e.target.value }))
+                    }
+                    className="w-full px-3 py-2 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb] dark:border-[#3a3330] text-xs"
+                  />
+                </div>
+              )}
 
               <div className="flex items-center justify-end gap-2 pt-3 border-t border-[#e6dfdb] dark:border-[#3a3330]">
                 <button
@@ -731,11 +799,20 @@ export const SalonRestockAlerts: React.FC<SalonRestockAlertsProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={submittingDraft}
-                  className="px-4 py-2 rounded-xl bg-[#7a2e4a] hover:bg-[#66243d] text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs disabled:opacity-60"
+                  disabled={
+                    submittingDraft ||
+                    (draftModalData.mode === "official_order" && !draftModalData.customerConfirmed)
+                  }
+                  className="px-4 py-2 rounded-xl bg-[#7a2e4a] hover:bg-[#66243d] text-white text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  <span>{submittingDraft ? "Submitting..." : "Submit Order Intake Card"}</span>
+                  <span>
+                    {submittingDraft
+                      ? "Submitting..."
+                      : draftModalData.mode === "official_order"
+                        ? "Create Official Order"
+                        : "Submit Request Card"}
+                  </span>
                 </button>
               </div>
             </form>

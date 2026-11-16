@@ -33,6 +33,7 @@ export interface SalonStockForecast {
   lastDeliveryDate: string | null;
   lastDeliveredUnits: number;
   totalOrdersDelivered: number;
+  hasHistoricalDeliveries: boolean;
   estimatedDepletionDays: number;
   restockAlertLevel: RestockAlertLevel;
   alertReason: string;
@@ -116,7 +117,9 @@ export function computeSalonStockForecasts(
     let daysSinceLastDelivery = 0;
     let lastDeliveredUnits = 0;
 
-    if (deliveredOrders.length > 0) {
+    const hasHistoricalDeliveries = deliveredOrders.length > 0;
+
+    if (hasHistoricalDeliveries) {
       // Find the most recent delivered order
       const sorted = [...deliveredOrders].sort((a, b) => {
         const ta = a.delivered_at || a.created_at || "";
@@ -130,17 +133,12 @@ export function computeSalonStockForecasts(
         daysSinceLastDelivery = Math.max(0, Math.floor(msElapsed / (1000 * 60 * 60 * 24)));
       }
       lastDeliveredUnits = mostRecent.items.reduce((sum, item) => sum + (Number(item.qty) || 0), 0);
-    } else {
-      // Fallback for salons with no explicit delivery order yet (use last_visited_at or realistic stage offset)
-      if (salon.last_visited_at) {
-        const msElapsed = referenceNow.getTime() - new Date(salon.last_visited_at).getTime();
-        daysSinceLastDelivery = Math.max(0, Math.floor(msElapsed / (1000 * 60 * 60 * 24)));
-      } else {
-        daysSinceLastDelivery = stage === "vip" ? 8 : stage === "regular" ? 12 : 16;
-      }
+    } else if (salon.last_visited_at) {
+      const msElapsed = referenceNow.getTime() - new Date(salon.last_visited_at).getTime();
+      daysSinceLastDelivery = Math.max(0, Math.floor(msElapsed / (1000 * 60 * 60 * 24)));
     }
 
-    // Accumulate items from recent deliveries
+    // Accumulate items from actual delivered orders only (never fabricate deliveries)
     const skuAggregates = new Map<
       string,
       {
@@ -173,20 +171,30 @@ export function computeSalonStockForecasts(
       }
     }
 
-    // If salon has no delivery items yet, seed representative products based on catalog
-    if (skuAggregates.size === 0 && skus.length > 0) {
-      const defaultSkus = skus.slice(0, stage === "vip" ? 3 : 2);
-      for (const s of defaultSkus) {
-        const seededQty = stage === "vip" ? 12 : stage === "regular" ? 8 : 4;
-        skuAggregates.set(s.name.trim(), {
-          skuName: s.name,
-          totalDeliveredQty: seededQty,
-          lastDeliveredQty: seededQty,
-          lastPrice: s.price,
-          lastDeliveredAt: salon.last_visited_at || new Date(referenceNow.getTime() - daysSinceLastDelivery * 86400000).toISOString(),
-        });
-      }
-      lastDeliveredUnits = Array.from(skuAggregates.values()).reduce((sum, v) => sum + v.lastDeliveredQty, 0);
+    if (!hasHistoricalDeliveries || skuAggregates.size === 0) {
+      return {
+        salonId: salon.id,
+        salonName: salon.name,
+        area: salon.area,
+        address: salon.address,
+        phone: salon.phone,
+        contactPerson: salon.contact_person,
+        stage,
+        totalEstimatedStockOnHand: 0,
+        totalStockValuePkr: 0,
+        orderFrequencyDays,
+        daysSinceLastDelivery,
+        lastDeliveryDate: null,
+        lastDeliveredUnits: 0,
+        totalOrdersDelivered: 0,
+        hasHistoricalDeliveries: false,
+        estimatedDepletionDays: 0,
+        restockAlertLevel: "healthy",
+        alertReason: "No historical deliveries recorded yet — forecast awaits first confirmed delivery.",
+        recommendedAction: "Record or deliver the salon's first official order to start depletion tracking.",
+        suggestedReorderSkus: [],
+        skuBreakdown: [],
+      };
     }
 
     // Compute SKU breakdowns
@@ -287,6 +295,7 @@ export function computeSalonStockForecasts(
       lastDeliveryDate,
       lastDeliveredUnits,
       totalOrdersDelivered: deliveredOrders.length,
+      hasHistoricalDeliveries: true,
       estimatedDepletionDays: minDaysOfStockLeft,
       restockAlertLevel,
       alertReason,

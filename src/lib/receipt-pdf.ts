@@ -52,8 +52,8 @@ export function buildDeliveryReceiptPdfModel(
   });
 
   return {
-    filename: `Lumex-Receipt-${safeOrderNum}.pdf`,
-    companyHeader: "Lumex - Official Delivery Receipt",
+    filename: `Kiran-Receipt-${safeOrderNum}.pdf`,
+    companyHeader: "Kiran DMS - Official Delivery Receipt",
     orderNumber: order.order_number,
     statusLabel: isDelivered ? "Delivered" : "Pending Delivery",
     timestampLabel,
@@ -238,7 +238,7 @@ export function createDeliveryReceiptPdfDocument(
   doc.setFontSize(8);
   doc.setTextColor(135, 125, 120);
   doc.text(
-    `Generated from Lumex DMS · ${model.orderNumber}`,
+    `Generated from Kiran DMS · ${model.orderNumber}`,
     margin,
     Math.min(footerY, 285),
   );

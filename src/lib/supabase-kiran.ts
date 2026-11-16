@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { validateCatalogSkuInput, type CatalogSkuInput } from "./catalog";
-import { INITIAL_SKUS, type DeliveryOrderItem, type RouteStop, type SKU } from "./data";
+import type { DeliveryOrderItem, RouteStop, SKU } from "./data";
 import type { OutboxFn } from "./outbox/types";
 import {
   deviceId,
@@ -12,18 +12,44 @@ import {
 import type {
   BootstrapPayload,
   CashLedgerEntry,
+  CommissionStatement,
   DeliveryOrderFull,
+  DeliverySignatureStatus,
+  InvestorInvestmentRow,
+  InvestorStatementEntry,
+  InvestorSummaryRow,
   LostDemandRecord,
+  LowStockAlertRow,
   ManagerApprovalAction,
   ManagerOverviewPayload,
+  OfficeApprovalRequestRow,
+  OfficeCommissionRepSummary,
+  OfficeDeviceRow,
+  OfficeInvitationRow,
+  OfficePendingDelivery,
   OrderCardRecord,
   PaymentRecord,
+  PendingReturnStockRow,
+  ProductGroupRow,
   PublicShopOrder,
+  RepBagItem,
   RepMonthlyStats,
+  RepPendingStockIssue,
   RepShift,
+  SalonAccountSummary,
   SalonActivityPayload,
   SalonAreaOption,
+  SalonCatalogueItem,
+  SalonInvoiceRow,
+  SalonLoginStatus,
+  SalonPortalOrder,
+  SalonPortalProfile,
+  SalonPortalRequest,
+  SalonSignupRequestRow,
+  SalonType,
   SalonWithApproval,
+  StockBalanceRow,
+  StockLocationRow,
   UserProfile,
   UserRole,
   VisitRecord,
@@ -120,6 +146,7 @@ export function mapOutboxFnToLiveRpc(
   defaults?: {
     defaultSalonId?: string;
     defaultAreaId?: string;
+    defaultBagId?: string;
     defaultLat?: number;
     defaultLng?: number;
   },
@@ -152,7 +179,7 @@ export function mapOutboxFnToLiveRpc(
       return {
         rpcName: "rep_check_in",
         rpcArgs: {
-          p_counted: [],
+          p_counted: Array.isArray(args.p_counted) ? args.p_counted : [],
           p_lat: typeof args.p_lat === "number" ? args.p_lat : null,
           p_lng: typeof args.p_lng === "number" ? args.p_lng : null,
           p_at_client: nowIso,
@@ -161,14 +188,16 @@ export function mapOutboxFnToLiveRpc(
     }
 
     case "record_count":
-      // Legacy queue item type retained only for backwards queue drain compatibility
       return {
-        rpcName: "rep_check_in",
+        rpcName: "record_count",
         rpcArgs: {
-          p_counted: [],
-          p_lat: null,
-          p_lng: null,
-          p_at_client: nowIso,
+          p_client_id: clientId,
+          p_location_id: ensureUuid(
+            typeof args.p_location_id === "string" ? args.p_location_id : defaults?.defaultBagId ?? "",
+          ),
+          p_kind: String(args.p_kind ?? "spot_check"),
+          p_counted: Array.isArray(args.p_counted) ? args.p_counted : [],
+          p_counted_at_client: nowIso,
         },
       };
 
@@ -180,13 +209,16 @@ export function mapOutboxFnToLiveRpc(
         },
       };
 
-    case "log_visit":
+    case "log_visit": {
+      const rawOutcome = String(args.p_outcome ?? "intro");
+      const validOutcome =
+        rawOutcome === "contacted" || !rawOutcome ? "intro" : rawOutcome;
       return {
         rpcName: "log_visit",
         rpcArgs: {
           p_client_id: clientId,
           p_salon_id: ensureUuid(String(args.p_salon_id ?? defaults?.defaultSalonId ?? "")),
-          p_outcome: String(args.p_outcome ?? "contacted"),
+          p_outcome: validOutcome,
           p_lat: typeof args.p_lat === "number" ? args.p_lat : (defaults?.defaultLat ?? 24.8607),
           p_lng: typeof args.p_lng === "number" ? args.p_lng : (defaults?.defaultLng ?? 67.0011),
           p_arrived_at_client: nowIso,
@@ -194,6 +226,7 @@ export function mapOutboxFnToLiveRpc(
           p_mock_location: false,
         },
       };
+    }
 
     case "add_salon_note":
       return {
@@ -209,12 +242,14 @@ export function mapOutboxFnToLiveRpc(
     case "create_salon": {
       const salonUuid = ensureUuid(typeof args.p_id === "string" ? args.p_id : clientId);
       const areaId = String(args.p_area_id ?? defaults?.defaultAreaId ?? "").trim();
+      const rawType = String(args.p_type ?? "unisex");
+      const validType = rawType === "salon" || !rawType ? "unisex" : rawType;
       return {
         rpcName: "create_salon",
         rpcArgs: {
           p_id: salonUuid,
           p_name: String(args.p_name ?? "").trim(),
-          p_type: String(args.p_type ?? "salon"),
+          p_type: validType,
           p_area_id: areaId ? ensureUuid(areaId) : null,
           p_source: String(args.p_source ?? "manual"),
           p_address: typeof args.p_address === "string" ? args.p_address : String(args.p_area ?? ""),
@@ -258,9 +293,17 @@ export function mapOutboxFnToLiveRpc(
 
     case "record_demand": {
       const qty = Math.max(1, Math.round(Number(args.p_qty ?? 1)));
-      const skuId = typeof args.p_sku_id === "string" && UUID_REGEX.test(args.p_sku_id) ? args.p_sku_id : null;
+      const reason = String(args.p_reason ?? "out_of_stock");
+      const skuId =
+        reason === "not_in_catalogue"
+          ? null
+          : typeof args.p_sku_id === "string" && UUID_REGEX.test(args.p_sku_id)
+            ? args.p_sku_id
+            : null;
       const groupId =
-        typeof args.p_product_group_id === "string" && UUID_REGEX.test(args.p_product_group_id)
+        reason === "not_in_catalogue" &&
+        typeof args.p_product_group_id === "string" &&
+        UUID_REGEX.test(args.p_product_group_id)
           ? args.p_product_group_id
           : null;
       return {
@@ -270,7 +313,7 @@ export function mapOutboxFnToLiveRpc(
           p_sku_id: skuId,
           p_product_group_id: groupId,
           p_qty: qty,
-          p_reason: String(args.p_reason ?? "out_of_stock"),
+          p_reason: reason,
           p_salon_id: typeof args.p_salon_id === "string" && UUID_REGEX.test(args.p_salon_id) ? args.p_salon_id : null,
           p_captured_at_client: nowIso,
         },
@@ -312,9 +355,7 @@ export function mapOutboxFnToLiveRpc(
 }
 
 function findImageKeyFallback(code: string, name: string, brand: string): string | undefined {
-  const byCode = INITIAL_SKUS.find((s) => s.sku_code.toLowerCase() === code.toLowerCase());
-  if (byCode?.image_key) return byCode.image_key;
-  const hay = `${name} ${brand}`.toLowerCase();
+  const hay = `${code} ${name} ${brand}`.toLowerCase();
   if (hay.includes("mocheqi")) {
     if (hay.includes("mask") || hay.includes("conditioner")) return "mocheqi-mask";
     if (hay.includes("serum") || hay.includes("oil")) return "mocheqi-serum";
@@ -382,7 +423,7 @@ export function mapCatalogueRowsToSkus(
         name: displayName,
         category,
         price: paisaToPkr(k.list_price_paisa as number | string | null | undefined),
-        bag_qty: availMap.get(skuId) ?? 10,
+        bag_qty: availMap.get(skuId) ?? 0,
         unit: rawUnit === "ml" || rawUnit === "l" || rawUnit === "g" ? "Bottle" : "Pack",
         brand,
         product_type: rawCategory,
@@ -820,11 +861,18 @@ export async function dispatchLiveOutboxRpc(
   const client = await requireClient();
   let defaultAreaId: string | undefined;
   let defaultSalonId: string | undefined;
+  let defaultBagId: string | undefined;
 
   if (fn === "create_salon" && !args.p_area_id) {
     const areasRes = await client.schema("app").rpc("my_areas");
     const areas = Array.isArray(areasRes.data) ? (areasRes.data as Array<{ area_id?: string }>) : [];
     defaultAreaId = areas[0]?.area_id;
+  }
+  if (fn === "record_count" && !args.p_location_id) {
+    const bagRes = await client.schema("app").rpc("my_bag_id");
+    if (typeof bagRes.data === "string" && UUID_REGEX.test(bagRes.data)) {
+      defaultBagId = bagRes.data;
+    }
   }
   if (args.p_fail || args.fail) {
     const salonsRes = await client.schema("app").rpc("my_salons", { p_limit: 1 });
@@ -835,6 +883,7 @@ export async function dispatchLiveOutboxRpc(
   const mapped = mapOutboxFnToLiveRpc(fn, args, {
     defaultAreaId,
     defaultSalonId,
+    defaultBagId,
   });
 
   const { data, error, status } = await client.schema("app").rpc(mapped.rpcName, mapped.rpcArgs);
@@ -936,7 +985,7 @@ export async function fetchLiveBootstrap(user: UserProfile): Promise<BootstrapPa
       profile: user,
       salons,
       route,
-      skus: liveSkus.length > 0 ? liveSkus : INITIAL_SKUS,
+      skus: liveSkus,
       orders,
       activeShift,
       currentBagCount: 0,
@@ -1348,7 +1397,7 @@ export async function fetchLiveManagerOverview(
     shopOrders: [] as PublicShopOrder[],
     deliveryOrders,
     lostDemand,
-    skus: skus.length > 0 ? skus : INITIAL_SKUS,
+    skus,
     stats: {
       visitsCompleted: shifts.length,
       visitsTarget: user.monthlyVisitTarget,
@@ -1368,13 +1417,22 @@ export async function executeLiveManagerApproval(
 
   switch (action.action) {
     case "approve_salon": {
+      const salonId = ensureUuid(action.id);
       const { error } = await client.schema("app").rpc("office_decide_salon", {
         p_client_id: ensureUuid(),
-        p_salon_id: ensureUuid(action.id),
+        p_salon_id: salonId,
         p_approve: true,
         p_reason: "Approved via Office Manager dashboard.",
       });
       throwIfRpcError(error, "Could not approve salon.");
+      if (action.stage && (action.stage === "trial" || action.stage === "regular" || action.stage === "vip")) {
+        const { error: stageErr } = await client.schema("app").rpc("office_override_stage", {
+          p_salon_id: salonId,
+          p_to: action.stage,
+          p_reason: `Stage set to ${action.stage} on approval.`,
+        });
+        throwIfRpcError(stageErr, "Salon approved, but stage override failed.");
+      }
       return { ok: true, message: "Salon approved and active." };
     }
 
@@ -1442,6 +1500,7 @@ export async function executeLiveManagerApproval(
     }
 
     case "mark_delivery_delivered": {
+      const orderId = ensureUuid(action.id);
       const { data: locs } = await client
         .from("stock_location")
         .select("id, kind")
@@ -1452,11 +1511,37 @@ export async function executeLiveManagerApproval(
       if (!warehouseId) {
         throw new SupabaseRpcError("No active warehouse stock location configured.", 400, "P0002");
       }
+
+      if (action.signature) {
+        const { data: lines } = await client
+          .from("sales_order_line")
+          .select("sku_id, qty")
+          .eq("order_id", orderId)
+          .order("line_no");
+        const orderLines = ((lines ?? []) as Array<{ sku_id: string; qty: number }>).map((l) => ({
+          sku_id: l.sku_id,
+          qty: Number(l.qty || 1),
+        }));
+        const rawSig = action.signature.pngBase64 || "";
+        const pngBase64 = rawSig.includes("base64,") ? rawSig.split("base64,")[1] || "" : rawSig;
+        const { error: sigErr } = await client.schema("app").rpc("office_attach_signature", {
+          p_client_id: ensureUuid(),
+          p_order_id: orderId,
+          p_lines: orderLines,
+          p_outcome: action.signature.outcome,
+          p_name: action.signature.signatoryName.trim(),
+          p_designation: action.signature.designation.trim(),
+          p_png_base64: pngBase64 || null,
+          p_note: action.signature.note?.trim() || null,
+        });
+        throwIfRpcError(sigErr, "Could not record delivery signature.");
+      }
+
       const { error } = await client.schema("app").rpc("office_deliver", {
         p_client_id: ensureUuid(),
-        p_order_id: ensureUuid(action.id),
+        p_order_id: orderId,
         p_warehouse_id: ensureUuid(warehouseId),
-        p_received_by_name: "Salon Reception",
+        p_received_by_name: action.signature?.signatoryName?.trim() || "Salon Reception",
       });
       throwIfRpcError(error, "Could not mark order delivered.");
       return { ok: true, message: "Order marked as delivered." };
@@ -1468,13 +1553,6 @@ export async function executeLiveManagerApproval(
       }
       return { ok: true, message: `${action.ids.length} orders marked as delivered.` };
     }
-
-    case "approve_shift":
-    case "flag_shift":
-      return { ok: true, message: "Shift status acknowledged." };
-
-    case "update_shop_order_status":
-      return { ok: true, message: `Shop order updated to ${action.status}.` };
 
     case "record_office_payment": {
       const amountPaisa = pkrToPaisa(action.amountPkr);
@@ -1593,6 +1671,12 @@ export async function upsertLiveCatalogSku(
     }
   }
 
+  const validImagePath =
+    clean.image_key &&
+    /^products\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.(png|jpg|jpeg|webp)$/i.test(clean.image_key)
+      ? clean.image_key
+      : null;
+
   const { error: prodErr } = await client.schema("app").rpc("office_upsert_product", {
     p_id: productId,
     p_product_group_id: groupId,
@@ -1600,7 +1684,7 @@ export async function upsertLiveCatalogSku(
     p_name: clean.name,
     p_active: true,
     p_description: clean.recommended_use,
-    p_image_path: clean.image_key ?? null,
+    p_image_path: validImagePath,
   });
   throwIfRpcError(prodErr, "Could not save catalog product.");
 
@@ -1633,7 +1717,7 @@ export async function upsertLiveCatalogSku(
     const { error: priceErr } = await client.schema("app").rpc("owner_set_sku_price", {
       p_sku_id: skuId,
       p_list_price_paisa: pricePaisa,
-      p_reason: "Updated from Lumex & Mocheqi catalog",
+      p_reason: "Updated from Kiran catalog",
     });
     throwIfRpcError(priceErr, "Could not set SKU price.");
   } else {
@@ -1641,7 +1725,7 @@ export async function upsertLiveCatalogSku(
       p_client_id: ensureUuid(),
       p_sku_id: skuId,
       p_price_paisa: pricePaisa,
-      p_reason: "Updated from Lumex & Mocheqi catalog",
+      p_reason: "Updated from Kiran catalog",
     });
     throwIfRpcError(priceErr, "Could not set SKU price.");
   }
@@ -1775,4 +1859,1136 @@ export async function fetchLiveCashLedgerEntries(limit = 100): Promise<CashLedge
 
   return mapCashLedgerRowsToEntries(data, salonNames, actorNames);
 }
+
+// =============================================================================
+// Salon Partner Portal (Email OTP proof + active salon_membership required)
+// =============================================================================
+
+export async function fetchSalonLoginStatus(): Promise<SalonLoginStatus | null> {
+  const client = await getSupabaseClient();
+  if (!client) return null;
+  const { data, error } = await client.schema("app").rpc("salon_login_status");
+  if (error || !data) return null;
+  const row = data as { membership_status?: string | null; name?: string | null };
+  return {
+    membershipStatus: (row.membership_status ?? null) as SalonLoginStatus["membershipStatus"],
+    salonName: row.name ?? null,
+  };
+}
+
+export async function applySalonSignup(input: {
+  salonName: string;
+  contactName: string;
+  type: SalonType;
+  address: string;
+}): Promise<{ status: string }> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("salon_apply", {
+    p_client_id: ensureUuid(),
+    p_salon_name: input.salonName.trim(),
+    p_contact_name: input.contactName.trim(),
+    p_type: input.type,
+    p_address: input.address.trim(),
+  });
+  throwIfRpcError(error, "Could not submit salon portal application.");
+  return (data ?? { status: "pending" }) as { status: string };
+}
+
+export async function fetchSalonMe(): Promise<SalonPortalProfile | null> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("salon_me");
+  if (error || !data) return null;
+  const r = data as Record<string, unknown>;
+  return {
+    salonId: String(r.salon_id ?? ""),
+    salonName: String(r.salon_name ?? "Salon Partner"),
+    type: String(r.type ?? "unisex") as SalonType,
+    stage: String(r.stage ?? "prospect") as SalonPortalProfile["stage"],
+    address: r.address ? String(r.address) : null,
+    areaName: String(r.area_name ?? "Karachi"),
+    contactName: r.contact_name ? String(r.contact_name) : null,
+    email: String(r.email ?? ""),
+    creditLimitPaisa: Number(r.credit_limit_paisa ?? 0),
+    planEligibility: String(r.plan_eligibility ?? "CASH"),
+    blocked: Boolean(r.blocked),
+  };
+}
+
+export async function fetchSalonCatalogue(): Promise<SalonCatalogueItem[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("salon_catalogue");
+  throwIfRpcError(error, "Could not load salon partner catalog.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    productId: String(r.product_id ?? ""),
+    brandLabel: String(r.brand_label ?? ""),
+    productName: String(r.product_name ?? ""),
+    description: r.description ? String(r.description) : null,
+    imagePath: r.image_path ? String(r.image_path) : null,
+    groupName: String(r.group_name ?? ""),
+    skuId: String(r.sku_id ?? ""),
+    code: String(r.code ?? ""),
+    variant: String(r.variant ?? ""),
+    unit: String(r.unit ?? ""),
+    sizeValue: r.size_value !== null && r.size_value !== undefined ? Number(r.size_value) : null,
+    pricePaisa: Number(r.price_paisa ?? 0),
+    ownPrice: Boolean(r.own_price),
+  }));
+}
+
+export async function fetchSalonMyRequests(): Promise<SalonPortalRequest[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("salon_my_requests");
+  throwIfRpcError(error, "Could not load salon order requests.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    requestId: String(r.request_id ?? ""),
+    createdAt: String(r.created_at ?? ""),
+    updatedAt: String(r.updated_at ?? ""),
+    version: Number(r.version ?? 1),
+    note: r.note ? String(r.note) : null,
+    lines: Array.isArray(r.lines)
+      ? (r.lines as Array<Record<string, unknown>>).map((l) => ({
+          skuId: String(l.sku_id ?? ""),
+          code: String(l.code ?? ""),
+          productName: String(l.product_name ?? ""),
+          variant: String(l.variant ?? ""),
+          qty: Number(l.qty ?? 1),
+          unitPricePaisa: Number(l.unit_price_paisa ?? 0),
+          ownPrice: Boolean(l.own_price),
+        }))
+      : [],
+    status: String(r.status ?? "open") as SalonPortalRequest["status"],
+    orderId: r.order_id ? String(r.order_id) : null,
+    reason: r.reason ? String(r.reason) : null,
+  }));
+}
+
+export async function submitSalonRequest(input: {
+  lines: Array<{ sku_id: string; qty: number }>;
+  note?: string | null;
+}): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("salon_submit_request", {
+    p_client_id: ensureUuid(),
+    p_lines: input.lines,
+    p_note: input.note?.trim() || null,
+  });
+  throwIfRpcError(error, "Could not submit salon order request.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+export async function editSalonRequest(input: {
+  requestId: string;
+  lines: Array<{ sku_id: string; qty: number }>;
+  note?: string | null;
+}): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("salon_edit_request", {
+    p_client_id: ensureUuid(),
+    p_request_id: ensureUuid(input.requestId),
+    p_lines: input.lines,
+    p_note: input.note?.trim() || null,
+  });
+  throwIfRpcError(error, "Could not update salon order request.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+export async function cancelSalonRequest(requestId: string, reason?: string): Promise<void> {
+  const client = await requireClient();
+  const { error } = await client.schema("app").rpc("salon_cancel_request", {
+    p_request_id: ensureUuid(requestId),
+    p_reason: reason?.trim() || "Cancelled by salon partner.",
+  });
+  throwIfRpcError(error, "Could not cancel salon order request.");
+}
+
+export async function fetchSalonMyOrders(): Promise<SalonPortalOrder[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("salon_my_orders");
+  throwIfRpcError(error, "Could not load official salon orders.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    orderId: String(r.order_id ?? ""),
+    createdAt: String(r.created_at ?? ""),
+    status: String(r.status ?? ""),
+    plan: String(r.plan ?? "CASH"),
+    subtotalPaisa: Number(r.subtotal_paisa ?? 0),
+    discountPaisa: Number(r.discount_paisa ?? 0),
+    totalPaisa: Number(r.total_paisa ?? 0),
+    fromRequest: Boolean(r.from_request),
+    waitingOn: r.waiting_on ? String(r.waiting_on) : null,
+    lines: Array.isArray(r.lines)
+      ? (r.lines as Array<Record<string, unknown>>).map((l) => ({
+          lineNo: Number(l.line_no ?? 1),
+          code: String(l.code ?? ""),
+          productName: String(l.product_name ?? ""),
+          variant: String(l.variant ?? ""),
+          qty: Number(l.qty ?? 1),
+          unitPricePaisa: Number(l.unit_price_paisa ?? 0),
+        }))
+      : [],
+  }));
+}
+
+export async function fetchSalonMyAccount(): Promise<SalonAccountSummary> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("salon_my_account");
+  throwIfRpcError(error, "Could not load salon account ledger.");
+  const r = (data ?? {}) as Record<string, unknown>;
+  const b = (r.balance ?? {}) as Record<string, unknown>;
+  return {
+    balance: {
+      invoicedPaisa: Number(b.invoiced_paisa ?? 0),
+      paidPaisa: Number(b.paid_paisa ?? 0),
+      balancePaisa: Number(b.balance_paisa ?? 0),
+      overduePaisa: Number(b.overdue_paisa ?? 0),
+      nextDueOn: b.next_due_on ? String(b.next_due_on) : null,
+    },
+    installments: Array.isArray(r.installments)
+      ? (r.installments as Array<Record<string, unknown>>).map((i) => ({
+          invoiceNumber: String(i.invoice_number ?? ""),
+          seq: Number(i.seq ?? 1),
+          ofCount: Number(i.of_count ?? 1),
+          dueOn: String(i.due_on ?? ""),
+          amountDuePaisa: Number(i.amount_due_paisa ?? 0),
+          paidPaisa: Number(i.paid_paisa ?? 0),
+          remainingPaisa: Number(i.remaining_paisa ?? 0),
+          status: String(i.status ?? ""),
+        }))
+      : [],
+    payments: Array.isArray(r.payments)
+      ? (r.payments as Array<Record<string, unknown>>).map((p) => ({
+          receiptNumber: String(p.receipt_number ?? ""),
+          paidAt: String(p.paid_at ?? ""),
+          method: String(p.method ?? "cash"),
+          amountPaisa: Number(p.amount_paisa ?? 0),
+        }))
+      : [],
+  };
+}
+
+export async function fetchSalonMyInvoices(): Promise<SalonInvoiceRow[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("salon_my_invoices");
+  throwIfRpcError(error, "Could not load salon invoices.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    invoiceId: String(r.invoice_id ?? ""),
+    number: String(r.number ?? ""),
+    issuedAt: String(r.issued_at ?? ""),
+    totalPaisa: Number(r.total_paisa ?? 0),
+    paidPaisa: Number(r.paid_paisa ?? 0),
+    outstandingPaisa: Number(r.outstanding_paisa ?? 0),
+  }));
+}
+
+export async function fetchSalonInvoiceDocument(invoiceId: string): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("salon_invoice_document", {
+    p_invoice_id: ensureUuid(invoiceId),
+  });
+  throwIfRpcError(error, "Could not load invoice document.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+// =============================================================================
+// Rep Bag, Blind Stock Issue Confirmations & Commission Statement
+// =============================================================================
+
+export async function fetchRepBagStock(): Promise<RepBagItem[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("my_bag");
+  throwIfRpcError(error, "Could not load rep bag stock.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    skuId: String(r.sku_id ?? ""),
+    code: String(r.code ?? ""),
+    variant: String(r.variant ?? ""),
+    onHand: Number(r.on_hand ?? 0),
+  }));
+}
+
+export async function fetchRepPendingIssues(): Promise<RepPendingStockIssue[]> {
+  const client = await requireClient();
+  const [issuesRes, skusRes] = await Promise.all([
+    client.schema("app").rpc("my_pending_issues"),
+    client.schema("app").rpc("my_issue_skus"),
+  ]);
+  throwIfRpcError(issuesRes.error, "Could not load pending stock issues.");
+  const skuMap = new Map<string, { skuId: string; code: string; variant: string }>();
+  for (const s of (skusRes.data ?? []) as Array<Record<string, unknown>>) {
+    const id = String(s.sku_id ?? "");
+    if (id) {
+      skuMap.set(id, {
+        skuId: id,
+        code: String(s.code ?? ""),
+        variant: String(s.variant ?? ""),
+      });
+    }
+  }
+  return ((issuesRes.data ?? []) as Array<Record<string, unknown>>).map((r) => {
+    const skuIds = Array.isArray(r.sku_ids) ? r.sku_ids.map(String) : [];
+    return {
+      id: String(r.id ?? ""),
+      direction: r.direction === "to_warehouse" ? "to_warehouse" : "to_rep",
+      decisionNote: r.decision_note ? String(r.decision_note) : null,
+      createdAt: String(r.created_at ?? ""),
+      skuIds,
+      skus: skuIds.map((id) => skuMap.get(id) ?? { skuId: id, code: id.slice(0, 8), variant: "" }),
+    };
+  });
+}
+
+export async function confirmRepStockIssue(
+  issueId: string,
+  counted: Array<{ sku_id: string; qty: number }>,
+): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("rep_confirm_stock_issue", {
+    p_issue_id: ensureUuid(issueId),
+    p_counted: counted,
+  });
+  throwIfRpcError(error, "Could not confirm stock issue count.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+function mapCommissionJson(raw: unknown): CommissionStatement {
+  const d = (raw ?? {}) as Record<string, unknown>;
+  return {
+    repId: String(d.rep_id ?? ""),
+    from: String(d.from ?? ""),
+    to: String(d.to ?? ""),
+    defaultRateBp: d.default_rate_bp !== null && d.default_rate_bp !== undefined ? Number(d.default_rate_bp) : null,
+    earnedPaisa: Number(d.earned_paisa ?? 0),
+    paidPaisa: Number(d.paid_paisa ?? 0),
+    earnedToDatePaisa: Number(d.earned_to_date_paisa ?? 0),
+    paidToDatePaisa: Number(d.paid_to_date_paisa ?? 0),
+    owedPaisa: Number(d.owed_paisa ?? 0),
+    invoiceCount: Number(d.invoice_count ?? 0),
+    invoices: Array.isArray(d.invoices)
+      ? (d.invoices as Array<Record<string, unknown>>).map((i) => ({
+          invoiceId: String(i.invoice_id ?? ""),
+          number: String(i.number ?? ""),
+          issuedAt: String(i.issued_at ?? ""),
+          salonName: String(i.salon_name ?? ""),
+          totalPaisa: Number(i.total_paisa ?? 0),
+          rateBp: Number(i.rate_bp ?? 0),
+          commissionPaisa: Number(i.commission_paisa ?? 0),
+        }))
+      : [],
+    payments: Array.isArray(d.payments)
+      ? (d.payments as Array<Record<string, unknown>>).map((p) => ({
+          paymentId: String(p.payment_id ?? ""),
+          kind: p.kind === "reversal" ? "reversal" : "payment",
+          amountPaisa: Number(p.amount_paisa ?? 0),
+          note: p.note ? String(p.note) : null,
+          reason: p.reason ? String(p.reason) : null,
+          reversesId: p.reverses_id ? String(p.reverses_id) : null,
+          reversed: Boolean(p.reversed),
+          recordedAt: String(p.recorded_at ?? ""),
+          recordedByName: String(p.recorded_by_name ?? ""),
+        }))
+      : [],
+    salonRates: Array.isArray(d.salon_rates)
+      ? (d.salon_rates as Array<Record<string, unknown>>).map((s) => ({
+          salonId: String(s.salon_id ?? ""),
+          salonName: String(s.salon_name ?? ""),
+          rateBp: s.rate_bp !== null && s.rate_bp !== undefined ? Number(s.rate_bp) : null,
+        }))
+      : [],
+  };
+}
+
+export async function fetchRepCommission(from: string, to: string): Promise<CommissionStatement> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("my_commission", {
+    p_from: from,
+    p_to: to,
+  });
+  throwIfRpcError(error, "Could not load commission statement.");
+  return mapCommissionJson(data);
+}
+
+// =============================================================================
+// Office Operations: Deliveries, Signatures, Pending Stock Returns, Official Orders
+// =============================================================================
+
+export async function fetchOfficePendingDeliveries(): Promise<OfficePendingDelivery[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_pending_deliveries");
+  throwIfRpcError(error, "Could not load pending delivery submissions.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    submissionId: String(r.submission_id ?? ""),
+    orderId: String(r.order_id ?? ""),
+    salonId: String(r.salon_id ?? ""),
+    salonName: String(r.salon_name ?? ""),
+    repId: String(r.rep_id ?? ""),
+    repName: String(r.rep_name ?? ""),
+    lines: Array.isArray(r.lines)
+      ? (r.lines as Array<Record<string, unknown>>).map((l) => ({
+          skuId: String(l.sku_id ?? ""),
+          code: String(l.code ?? ""),
+          variant: String(l.variant ?? ""),
+          qty: Number(l.qty ?? 1),
+          unitPricePaisa: Number(l.unit_price_paisa ?? 0),
+        }))
+      : [],
+    totalPaisa: Number(r.total_paisa ?? 0),
+    receivedByName: String(r.received_by_name ?? ""),
+    distanceFromPinM:
+      r.distance_from_pin_m !== null && r.distance_from_pin_m !== undefined
+        ? Number(r.distance_from_pin_m)
+        : null,
+    mockLocation: Boolean(r.mock_location),
+    flags: r.flags && typeof r.flags === "object" ? (r.flags as Record<string, unknown>) : null,
+    submittedAt: String(r.submitted_at ?? ""),
+  }));
+}
+
+export async function fetchOfficeDeliverySignature(
+  submissionId: string,
+): Promise<DeliverySignatureStatus | null> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_delivery_signature", {
+    p_submission_id: ensureUuid(submissionId),
+  });
+  throwIfRpcError(error, "Could not load delivery signature metadata.");
+  if (!data) return null;
+  const r = data as Record<string, unknown>;
+  return {
+    signatureId: r.signature_id ? String(r.signature_id) : null,
+    outcome: r.outcome ? String(r.outcome) : null,
+    signatoryName: r.signatory_name ? String(r.signatory_name) : null,
+    signatoryDesignation: r.signatory_designation ? String(r.signatory_designation) : null,
+    statementVersion: r.statement_version !== null && r.statement_version !== undefined ? Number(r.statement_version) : null,
+    signedAt: r.signed_at ? String(r.signed_at) : null,
+    note: r.note ? String(r.note) : null,
+    valid: Boolean(r.valid),
+    hasPicture: Boolean(r.has_picture),
+  };
+}
+
+export async function fetchOfficeSignatureImage(
+  signatureId: string,
+  purpose = "Office delivery verification",
+): Promise<string> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_signature_image", {
+    p_signature_id: ensureUuid(signatureId),
+    p_purpose: purpose,
+  });
+  throwIfRpcError(error, "Could not load delivery signature image.");
+  const str = typeof data === "string" ? data : "";
+  if (!str) return "";
+  return str.startsWith("data:") ? str : `data:image/png;base64,${str}`;
+}
+
+export async function approveOfficeDelivery(submissionId: string): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_approve_delivery", {
+    p_submission_id: ensureUuid(submissionId),
+    p_client_id: ensureUuid(),
+  });
+  throwIfRpcError(error, "Could not approve delivery submission.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+export async function rejectOfficeDelivery(submissionId: string, reason: string): Promise<void> {
+  const client = await requireClient();
+  const { error } = await client.schema("app").rpc("office_reject_delivery", {
+    p_submission_id: ensureUuid(submissionId),
+    p_client_id: ensureUuid(),
+    p_reason: reason.trim(),
+  });
+  throwIfRpcError(error, "Could not reject delivery submission.");
+}
+
+export async function createOfficialOrderFromForecast(input: {
+  salonId: string;
+  plan: "CASH" | "INST2" | "INST4";
+  lines: Array<{ sku_id: string; qty: number }>;
+  assignedRepId?: string | null;
+}): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_create_order", {
+    p_client_id: ensureUuid(),
+    p_salon_id: ensureUuid(input.salonId),
+    p_plan: input.plan,
+    p_lines: input.lines,
+    p_assigned_rep_id: input.assignedRepId ? ensureUuid(input.assignedRepId) : null,
+    p_intake_card_id: null,
+    p_card_version: null,
+  });
+  throwIfRpcError(error, "Could not create official sales order.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+export async function fetchOfficePendingStock(): Promise<PendingReturnStockRow[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_pending_stock");
+  throwIfRpcError(error, "Could not load unsettled pending stock.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    submissionId: String(r.submission_id ?? ""),
+    repId: String(r.rep_id ?? ""),
+    repName: String(r.rep_name ?? ""),
+    salonName: String(r.salon_name ?? ""),
+    skuId: String(r.sku_id ?? ""),
+    skuCode: String(r.sku_code ?? ""),
+    unsettled: Number(r.unsettled ?? 0),
+    pendingLocationId: String(r.pending_location_id ?? ""),
+    reason: String(r.reason ?? ""),
+    decidedAt: String(r.decided_at ?? ""),
+    requestId: r.request_id ? String(r.request_id) : null,
+    requestStatus: r.request_status ? String(r.request_status) : null,
+    requestMakerId: r.request_maker_id ? String(r.request_maker_id) : null,
+    requestCheckerRole: (r.request_checker_role ? String(r.request_checker_role) : null) as UserRole | null,
+    requestQty: r.request_qty !== null && r.request_qty !== undefined ? Number(r.request_qty) : null,
+    requestDecisionReason: r.request_decision_reason ? String(r.request_decision_reason) : null,
+  }));
+}
+
+export async function resolveOfficePendingStock(input: {
+  submissionId: string;
+  skuId: string;
+  qty: number;
+  outcome: "returned_to_bag" | "returned_to_warehouse" | "missing";
+  note: string;
+  warehouseId?: string | null;
+  approvalId?: string | null;
+}): Promise<void> {
+  const client = await requireClient();
+  const { error } = await client.schema("app").rpc("office_resolve_pending", {
+    p_client_id: ensureUuid(),
+    p_submission_id: ensureUuid(input.submissionId),
+    p_sku_id: ensureUuid(input.skuId),
+    p_qty: Math.max(1, Math.round(input.qty)),
+    p_outcome: input.outcome,
+    p_note: input.note.trim(),
+    p_warehouse_id: input.warehouseId ? ensureUuid(input.warehouseId) : null,
+    p_approval_id: input.approvalId ? ensureUuid(input.approvalId) : null,
+  });
+  throwIfRpcError(error, "Could not settle pending stock.");
+}
+
+// =============================================================================
+// Governance, Devices, Signups, Invitations, Maker-Checker Approvals, Pricing
+// =============================================================================
+
+export async function fetchOfficePendingSignups(): Promise<SalonSignupRequestRow[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_pending_signups");
+  throwIfRpcError(error, "Could not load salon portal signups.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    requestId: String(r.request_id ?? ""),
+    salonName: String(r.salon_name ?? ""),
+    contactName: String(r.contact_name ?? ""),
+    email: String(r.email ?? ""),
+    type: String(r.type ?? "unisex") as SalonType,
+    address: String(r.address ?? ""),
+    createdAt: String(r.created_at ?? ""),
+    similarSalons: Array.isArray(r.similar_salons)
+      ? (r.similar_salons as Array<{ id: string; name: string; area_name: string }>)
+      : [],
+  }));
+}
+
+export async function decideOfficeSignup(input: {
+  requestId: string;
+  approve: boolean;
+  reason: string;
+  areaId?: string | null;
+  existingSalonId?: string | null;
+  repId?: string | null;
+  rateBp?: number | null;
+}): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_decide_signup", {
+    p_client_id: ensureUuid(),
+    p_request_id: ensureUuid(input.requestId),
+    p_approve: input.approve,
+    p_reason: input.reason.trim(),
+    p_area_id: input.areaId ? ensureUuid(input.areaId) : null,
+    p_existing_salon_id: input.existingSalonId ? ensureUuid(input.existingSalonId) : null,
+    p_rep_id: input.repId ? ensureUuid(input.repId) : null,
+    p_rate_bp: typeof input.rateBp === "number" ? input.rateBp : null,
+  });
+  throwIfRpcError(error, "Could not decide salon signup request.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+export async function fetchOfficeInvitations(): Promise<OfficeInvitationRow[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_invitations");
+  throwIfRpcError(error, "Could not load invitations.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    id: String(r.id ?? ""),
+    kind: r.kind === "salon" ? "salon" : "rep",
+    email: String(r.email ?? ""),
+    fullName: String(r.full_name ?? ""),
+    salonId: r.salon_id ? String(r.salon_id) : null,
+    salonName: r.salon_name ? String(r.salon_name) : null,
+    status: String(r.status ?? ""),
+    expiresAt: String(r.expires_at ?? ""),
+    invitedByName: String(r.invited_by_name ?? ""),
+    createdAt: String(r.created_at ?? ""),
+    redeemedAt: r.redeemed_at ? String(r.redeemed_at) : null,
+    revokedAt: r.revoked_at ? String(r.revoked_at) : null,
+  }));
+}
+
+export async function createOfficeInvitation(input: {
+  kind: "rep" | "salon";
+  fullName: string;
+  email: string;
+  salonId?: string | null;
+}): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_invite", {
+    p_client_id: ensureUuid(),
+    p_kind: input.kind,
+    p_full_name: input.fullName.trim(),
+    p_email: input.email.trim().toLowerCase(),
+    p_salon_id: input.salonId ? ensureUuid(input.salonId) : null,
+  });
+  throwIfRpcError(error, "Could not create invitation.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+export async function revokeOfficeInvitation(invitationId: string, reason: string): Promise<void> {
+  const client = await requireClient();
+  const { error } = await client.schema("app").rpc("office_revoke_invitation", {
+    p_invitation_id: ensureUuid(invitationId),
+    p_reason: reason.trim(),
+  });
+  throwIfRpcError(error, "Could not revoke invitation.");
+}
+
+export async function fetchOfficeDevices(): Promise<OfficeDeviceRow[]> {
+  const client = await requireClient();
+  const { data, error } = await client
+    .from("device")
+    .select("id, user_id, label, platform, status, created_at, approved_at, revoked_at, last_seen_at, user_profile!device_user_id_fkey(full_name, role)")
+    .order("created_at", { ascending: false })
+    .limit(100);
+  throwIfRpcError(error, "Could not load staff devices.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((d) => {
+    const prof = (Array.isArray(d.user_profile) ? d.user_profile[0] : d.user_profile) as {
+      full_name?: string;
+      role?: UserRole;
+    } | null;
+    return {
+      id: String(d.id ?? ""),
+      userId: String(d.user_id ?? ""),
+      userName: String(prof?.full_name ?? "Staff Member"),
+      userRole: prof?.role ?? "rep",
+      label: d.label ? String(d.label) : null,
+      platform: d.platform ? String(d.platform) : null,
+      status: (String(d.status ?? "pending") as OfficeDeviceRow["status"]),
+      createdAt: String(d.created_at ?? ""),
+      approvedAt: d.approved_at ? String(d.approved_at) : null,
+      revokedAt: d.revoked_at ? String(d.revoked_at) : null,
+      lastSeenAt: d.last_seen_at ? String(d.last_seen_at) : null,
+    };
+  });
+}
+
+export async function decideOfficeDevice(
+  deviceRowId: string,
+  approve: boolean,
+  reason: string,
+): Promise<void> {
+  const client = await requireClient();
+  const rpcName = approve ? "approve_device" : "revoke_device";
+  const { error } = await client.schema("app").rpc(rpcName, {
+    p_device_id: ensureUuid(deviceRowId),
+    p_reason: reason.trim(),
+  });
+  throwIfRpcError(error, approve ? "Could not approve device." : "Could not revoke device.");
+}
+
+export async function fetchOfficePendingApprovals(): Promise<OfficeApprovalRequestRow[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_pending_approvals");
+  throwIfRpcError(error, "Could not load pending approval requests.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    requestId: String(r.request_id ?? ""),
+    kind: String(r.kind ?? ""),
+    status: String(r.status ?? "pending") as OfficeApprovalRequestRow["status"],
+    subjectType: String(r.subject_type ?? ""),
+    subjectId: String(r.subject_id ?? ""),
+    madeByMe: Boolean(r.made_by_me),
+    makerName: String(r.maker_name ?? ""),
+    checkerRoleRequired: (String(r.checker_role_required ?? "manager") as UserRole),
+    reason: String(r.reason ?? ""),
+    createdAt: String(r.created_at ?? ""),
+    orderStatus: r.order_status ? String(r.order_status) : null,
+    salonId: r.salon_id ? String(r.salon_id) : null,
+    salonName: r.salon_name ? String(r.salon_name) : null,
+    subtotalPaisa: r.subtotal_paisa !== null && r.subtotal_paisa !== undefined ? Number(r.subtotal_paisa) : null,
+    discountPaisa: r.discount_paisa !== null && r.discount_paisa !== undefined ? Number(r.discount_paisa) : null,
+    totalPaisa: r.total_paisa !== null && r.total_paisa !== undefined ? Number(r.total_paisa) : null,
+    locationName: r.location_name ? String(r.location_name) : null,
+    locationKind: r.location_kind ? String(r.location_kind) : null,
+    skuId: r.sku_id ? String(r.sku_id) : null,
+    skuCode: r.sku_code ? String(r.sku_code) : null,
+    qtyDelta: r.qty_delta !== null && r.qty_delta !== undefined ? Number(r.qty_delta) : null,
+  }));
+}
+
+export async function decideOfficeApproval(
+  requestId: string,
+  approve: boolean,
+  reason: string,
+): Promise<void> {
+  const client = await requireClient();
+  const { error } = await client.schema("app").rpc("decide_approval", {
+    p_request_id: ensureUuid(requestId),
+    p_approve: approve,
+    p_reason: reason.trim(),
+  });
+  throwIfRpcError(error, "Could not decide approval request.");
+}
+
+export async function assignSalonRep(
+  salonId: string,
+  repId: string | null,
+  rateBp?: number | null,
+): Promise<void> {
+  const client = await requireClient();
+  const { error } = await client.schema("app").rpc("office_assign_salon_rep", {
+    p_client_id: ensureUuid(),
+    p_salon_id: ensureUuid(salonId),
+    p_rep_id: repId ? ensureUuid(repId) : null,
+    p_rate_bp: typeof rateBp === "number" ? rateBp : null,
+  });
+  throwIfRpcError(error, "Could not assign salon representative.");
+}
+
+export async function setOfficeSalonPrice(
+  salonId: string,
+  skuId: string,
+  pricePkr: number,
+  reason: string,
+): Promise<void> {
+  const client = await requireClient();
+  const { error } = await client.schema("app").rpc("office_set_salon_price", {
+    p_client_id: ensureUuid(),
+    p_salon_id: ensureUuid(salonId),
+    p_sku_id: ensureUuid(skuId),
+    p_price_paisa: pkrToPaisa(pricePkr),
+    p_reason: reason.trim(),
+  });
+  throwIfRpcError(error, "Could not set salon-specific SKU price.");
+}
+
+export async function setOfficeMemberStatus(
+  kind: "staff" | "salon",
+  memberId: string,
+  status: string,
+  reason: string,
+): Promise<void> {
+  const client = await requireClient();
+  const { error } = await client.schema("app").rpc("office_set_member_status", {
+    p_kind: kind,
+    p_member_id: ensureUuid(memberId),
+    p_status: status,
+    p_reason: reason.trim(),
+  });
+  throwIfRpcError(error, "Could not update member status.");
+}
+
+export async function fetchStaffUsers(): Promise<Array<{ id: string; fullName: string; role: UserRole; status: string }>> {
+  const client = await requireClient();
+  const { data, error } = await client
+    .from("user_profile")
+    .select("id, full_name, role, status")
+    .order("full_name");
+  throwIfRpcError(error, "Could not load staff directory.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((u) => ({
+    id: String(u.id ?? ""),
+    fullName: String(u.full_name ?? "Staff"),
+    role: (String(u.role ?? "rep") as UserRole),
+    status: String(u.status ?? "active"),
+  }));
+}
+
+// =============================================================================
+// Inventory Architecture (Locations, Balances, Stock Issues, Adjustments, Rules)
+// =============================================================================
+
+export async function fetchStockLocations(): Promise<StockLocationRow[]> {
+  const client = await requireClient();
+  const { data, error } = await client
+    .from("stock_location")
+    .select("id, name, kind, owner_user_id, active")
+    .eq("active", true)
+    .order("kind");
+  throwIfRpcError(error, "Could not load stock locations.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((l) => ({
+    id: String(l.id ?? ""),
+    name: String(l.name ?? "Location"),
+    kind: (String(l.kind ?? "warehouse") as StockLocationRow["kind"]),
+    ownerUserId: l.owner_user_id ? String(l.owner_user_id) : null,
+    active: Boolean(l.active),
+  }));
+}
+
+export async function fetchStockBalances(locationId?: string | null): Promise<StockBalanceRow[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("stock_on_hand", {
+    p_location_id: locationId ? ensureUuid(locationId) : null,
+  });
+  throwIfRpcError(error, "Could not load stock balances.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    locationId: String(r.location_id ?? ""),
+    skuId: String(r.sku_id ?? ""),
+    onHand: Number(r.on_hand ?? 0),
+  }));
+}
+
+export async function fetchLowStockAlerts(): Promise<LowStockAlertRow[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("low_stock");
+  throwIfRpcError(error, "Could not load reorder alerts.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    skuId: String(r.sku_id ?? ""),
+    code: String(r.code ?? ""),
+    onHand: Number(r.on_hand ?? 0),
+    reorderPoint: Number(r.reorder_point ?? 0),
+  }));
+}
+
+export async function proposeOfficeStockIssue(input: {
+  direction: "to_rep" | "to_warehouse";
+  warehouseId: string;
+  bagId: string;
+  lines: Array<{ sku_id: string; qty: number }>;
+  routeDate?: string | null;
+  note?: string | null;
+}): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_propose_stock_issue", {
+    p_client_id: ensureUuid(),
+    p_direction: input.direction,
+    p_warehouse_id: ensureUuid(input.warehouseId),
+    p_bag_id: ensureUuid(input.bagId),
+    p_lines: input.lines,
+    p_route_date: input.routeDate || null,
+    p_note: input.note?.trim() || null,
+  });
+  throwIfRpcError(error, "Could not propose stock issue.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+export async function ownerAdjustStock(input: {
+  locationId: string;
+  skuId: string;
+  qtyDelta: number;
+  reason: string;
+}): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("owner_adjust_stock", {
+    p_client_id: ensureUuid(),
+    p_location_id: ensureUuid(input.locationId),
+    p_sku_id: ensureUuid(input.skuId),
+    p_qty_delta: Math.round(input.qtyDelta),
+    p_reason: input.reason.trim(),
+  });
+  throwIfRpcError(error, "Could not adjust stock.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+export async function setOfficeReorderPoint(skuId: string, reorderPoint: number): Promise<void> {
+  const client = await requireClient();
+  const { error } = await client.schema("app").rpc("office_set_reorder_point", {
+    p_sku_id: ensureUuid(skuId),
+    p_reorder_point: Math.max(0, Math.round(reorderPoint)),
+  });
+  throwIfRpcError(error, "Could not update reorder point.");
+}
+
+export async function fetchProductGroups(): Promise<ProductGroupRow[]> {
+  const client = await requireClient();
+  const { data, error } = await client
+    .from("product_group")
+    .select("id, name, default_cycle_days, active")
+    .eq("active", true)
+    .order("name");
+  throwIfRpcError(error, "Could not load product groups.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((g) => ({
+    id: String(g.id ?? ""),
+    name: String(g.name ?? ""),
+    defaultCycleDays: Number(g.default_cycle_days ?? 30),
+    active: Boolean(g.active),
+  }));
+}
+
+// =============================================================================
+// Office Commission & Invoices / Receipts
+// =============================================================================
+
+export async function fetchOfficeCommissionReps(from: string, to: string): Promise<OfficeCommissionRepSummary[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_commission_reps", {
+    p_from: from,
+    p_to: to,
+  });
+  throwIfRpcError(error, "Could not load rep commission summary.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    repId: String(r.rep_id ?? ""),
+    fullName: String(r.full_name ?? ""),
+    status: String(r.status ?? "active"),
+    defaultRateBp: r.default_rate_bp !== null && r.default_rate_bp !== undefined ? Number(r.default_rate_bp) : null,
+    earnedPaisa: Number(r.earned_paisa ?? 0),
+    paidPaisa: Number(r.paid_paisa ?? 0),
+    owedPaisa: Number(r.owed_paisa ?? 0),
+  }));
+}
+
+export async function fetchOfficeCommission(repId: string, from: string, to: string): Promise<CommissionStatement> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_commission", {
+    p_rep_id: ensureUuid(repId),
+    p_from: from,
+    p_to: to,
+  });
+  throwIfRpcError(error, "Could not load rep commission ledger.");
+  return mapCommissionJson(data);
+}
+
+export async function setOfficeCommissionRate(repId: string, rateBp: number, reason: string): Promise<void> {
+  const client = await requireClient();
+  const { error } = await client.schema("app").rpc("office_set_commission_rate", {
+    p_client_id: ensureUuid(),
+    p_rep_id: ensureUuid(repId),
+    p_rate_bp: Math.round(rateBp),
+    p_reason: reason.trim(),
+  });
+  throwIfRpcError(error, "Could not update commission rate.");
+}
+
+export async function recordOfficeCommissionPayment(
+  repId: string,
+  amountPkr: number,
+  note?: string,
+): Promise<void> {
+  const client = await requireClient();
+  const { error } = await client.schema("app").rpc("office_record_commission_payment", {
+    p_client_id: ensureUuid(),
+    p_rep_id: ensureUuid(repId),
+    p_amount_paisa: pkrToPaisa(amountPkr),
+    p_note: note?.trim() || null,
+  });
+  throwIfRpcError(error, "Could not record commission payment.");
+}
+
+export async function reverseOfficeCommissionPayment(paymentId: string, reason: string): Promise<void> {
+  const client = await requireClient();
+  const { error } = await client.schema("app").rpc("office_reverse_commission_payment", {
+    p_client_id: ensureUuid(),
+    p_payment_id: ensureUuid(paymentId),
+    p_reason: reason.trim(),
+  });
+  throwIfRpcError(error, "Could not reverse commission payment.");
+}
+
+export async function fetchOfficeInvoices(salonId?: string | null): Promise<
+  Array<{
+    invoiceId: string;
+    number: string;
+    issuedAt: string;
+    salonId: string;
+    salonName: string;
+    orderId: string;
+    totalPaisa: number;
+  }>
+> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_invoices", {
+    p_salon_id: salonId ? ensureUuid(salonId) : null,
+  });
+  throwIfRpcError(error, "Could not load office invoices.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((i) => ({
+    invoiceId: String(i.invoice_id ?? ""),
+    number: String(i.number ?? ""),
+    issuedAt: String(i.issued_at ?? ""),
+    salonId: String(i.salon_id ?? ""),
+    salonName: String(i.salon_name ?? ""),
+    orderId: String(i.order_id ?? ""),
+    totalPaisa: Number(i.total_paisa ?? 0),
+  }));
+}
+
+export async function fetchInvoiceDocument(invoiceId: string): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("invoice_document", {
+    p_invoice_id: ensureUuid(invoiceId),
+  });
+  throwIfRpcError(error, "Could not load invoice document.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+// =============================================================================
+// Owner Investor Ledger (Manual Decisions & Manual Payouts Only — NO AUTO ROI)
+// =============================================================================
+
+export async function fetchOfficeInvestors(): Promise<InvestorSummaryRow[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_investors");
+  throwIfRpcError(error, "Could not load investor ledger.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    investorId: r.investor_id ? String(r.investor_id) : null,
+    fullName: String(r.full_name ?? "Total"),
+    phone: r.phone ? String(r.phone) : null,
+    status: r.status ? String(r.status) : null,
+    isTotal: Boolean(r.is_total),
+    investedPaisa: Number(r.invested_paisa ?? 0),
+    principalReturnedPaisa: Number(r.principal_returned_paisa ?? 0),
+    principalOutstandingPaisa: Number(r.principal_outstanding_paisa ?? 0),
+    profitDecidedPaisa: Number(r.profit_decided_paisa ?? 0),
+    profitPaidPaisa: Number(r.profit_paid_paisa ?? 0),
+    profitOwedPaisa: Number(r.profit_owed_paisa ?? 0),
+  }));
+}
+
+export async function fetchInvestorInvestments(investorId: string): Promise<InvestorInvestmentRow[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_investor_investments", {
+    p_investor_id: ensureUuid(investorId),
+  });
+  throwIfRpcError(error, "Could not load investor tranches.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    investmentId: String(r.investment_id ?? ""),
+    investedOn: String(r.invested_on ?? ""),
+    note: r.note ? String(r.note) : null,
+    recordedAt: String(r.recorded_at ?? ""),
+    reversed: Boolean(r.reversed),
+    investedPaisa: Number(r.invested_paisa ?? 0),
+    principalReturnedPaisa: Number(r.principal_returned_paisa ?? 0),
+    principalOutstandingPaisa: Number(r.principal_outstanding_paisa ?? 0),
+    profitDecidedPaisa: Number(r.profit_decided_paisa ?? 0),
+    profitPaidPaisa: Number(r.profit_paid_paisa ?? 0),
+    profitOwedPaisa: Number(r.profit_owed_paisa ?? 0),
+  }));
+}
+
+export async function fetchInvestorStatement(
+  investorId: string,
+  from?: string | null,
+  to?: string | null,
+): Promise<InvestorStatementEntry[]> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_investor_statement", {
+    p_investor_id: ensureUuid(investorId),
+    p_from: from || null,
+    p_to: to || null,
+  });
+  throwIfRpcError(error, "Could not load investor statement.");
+  return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    entryKind: String(r.entry_kind ?? ""),
+    entryId: String(r.entry_id ?? ""),
+    investmentId: String(r.investment_id ?? ""),
+    entryOn: String(r.entry_on ?? ""),
+    payoutKind: r.payout_kind ? (String(r.payout_kind) as "principal" | "profit") : null,
+    method: r.method ? (String(r.method) as "cash" | "bank") : null,
+    reference: r.reference ? String(r.reference) : null,
+    amountPaisa: Number(r.amount_paisa ?? 0),
+    note: r.note ? String(r.note) : null,
+    reason: r.reason ? String(r.reason) : null,
+    reversesId: r.reverses_id ? String(r.reverses_id) : null,
+    reversed: Boolean(r.reversed),
+    recordedByName: String(r.recorded_by_name ?? ""),
+    recordedAt: String(r.recorded_at ?? ""),
+    principalOutstandingPaisa: Number(r.principal_outstanding_paisa ?? 0),
+    profitOwedPaisa: Number(r.profit_owed_paisa ?? 0),
+  }));
+}
+
+export async function createOfficeInvestor(input: {
+  fullName: string;
+  phone?: string;
+  note?: string;
+}): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_create_investor", {
+    p_client_id: ensureUuid(),
+    p_full_name: input.fullName.trim(),
+    p_phone: input.phone?.trim() || null,
+    p_note: input.note?.trim() || null,
+  });
+  throwIfRpcError(error, "Could not create investor record.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+export async function addOfficeInvestment(input: {
+  investorId: string;
+  amountPkr: number;
+  investedOn: string;
+  note?: string;
+}): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_add_investment", {
+    p_client_id: ensureUuid(),
+    p_investor_id: ensureUuid(input.investorId),
+    p_amount_paisa: pkrToPaisa(input.amountPkr),
+    p_invested_on: input.investedOn,
+    p_note: input.note?.trim() || null,
+  });
+  throwIfRpcError(error, "Could not add investment.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+export async function decideInvestorProfit(input: {
+  investmentId: string;
+  amountPkr: number;
+  decidedOn: string;
+  note?: string;
+}): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_decide_profit", {
+    p_client_id: ensureUuid(),
+    p_investment_id: ensureUuid(input.investmentId),
+    p_amount_paisa: pkrToPaisa(input.amountPkr),
+    p_decided_on: input.decidedOn,
+    p_note: input.note?.trim() || null,
+  });
+  throwIfRpcError(error, "Could not record manual profit decision.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+export async function recordInvestorPayout(input: {
+  investmentId: string;
+  kind: "profit" | "principal";
+  method: "cash" | "bank" | "other";
+  amountPkr: number;
+  paidOn: string;
+  reference?: string;
+  note?: string;
+}): Promise<Record<string, unknown>> {
+  const client = await requireClient();
+  const { data, error } = await client.schema("app").rpc("office_record_payout", {
+    p_client_id: ensureUuid(),
+    p_investment_id: ensureUuid(input.investmentId),
+    p_kind: input.kind,
+    p_method: input.method,
+    p_amount_paisa: pkrToPaisa(input.amountPkr),
+    p_paid_on: input.paidOn,
+    p_reference: input.reference?.trim() || null,
+    p_note: input.note?.trim() || null,
+  });
+  throwIfRpcError(error, "Could not record investor payout.");
+  return (data ?? {}) as Record<string, unknown>;
+}
+
+export async function reverseInvestorEntry(input: {
+  entryKind: string;
+  entryId: string;
+  reason: string;
+}): Promise<void> {
+  const client = await requireClient();
+  const { error } = await client.schema("app").rpc("office_reverse_investor_entry", {
+    p_client_id: ensureUuid(),
+    p_entry_kind: input.entryKind,
+    p_entry_id: ensureUuid(input.entryId),
+    p_reason: input.reason.trim(),
+  });
+  throwIfRpcError(error, "Could not reverse investor entry.");
+}
+
 

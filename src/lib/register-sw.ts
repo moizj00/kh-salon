@@ -15,14 +15,14 @@ export function registerServiceWorker(): void {
           if (installing) {
             installing.addEventListener("statechange", () => {
               if (installing.state === "installed" && navigator.serviceWorker.controller) {
-                console.log("Lumex DMS: New PWA version ready.");
+                console.log("Kiran DMS: New PWA version ready.");
               }
             });
           }
         });
       })
       .catch((error) => {
-        console.warn("Lumex DMS: Service worker registration skipped:", error);
+        console.warn("Kiran DMS: Service worker registration skipped:", error);
       });
   });
 }

@@ -1,14 +1,12 @@
-import { apiFetch, getAuthMode } from "../api";
 import { dispatchLiveOutboxRpc } from "../supabase-kiran";
 import { type DrainReport, drain } from "./drain";
 import { enqueue, retry } from "./queue";
 import { openIdbStore } from "./store-idb";
-import type { Dependency, OutboxFn, OutboxItem, OutboxStore, SyncAttempt } from "./types";
+import type { Dependency, OutboxFn, OutboxItem, SyncAttempt } from "./types";
 
 export type { SyncAttempt };
 
 const USER_KEY = "kiran.outbox.user";
-const DEFAULT_USER_ID = "rep-karachi-pilot-01";
 const DRAIN_LOCK = "kiran.outbox.drain";
 const CHANNEL = "kiran.outbox";
 const SYNC_INTERVAL_MS = 30_000;
@@ -134,21 +132,27 @@ export function setSimulatedOffline(offline: boolean) {
 }
 
 export const captureUserId = async (): Promise<string> => {
-  if (typeof window === "undefined") return DEFAULT_USER_ID;
-  const id = window.localStorage.getItem(USER_KEY) ?? DEFAULT_USER_ID;
-  window.localStorage.setItem(USER_KEY, id);
-  return id;
+  if (typeof window === "undefined") return "";
+  return window.localStorage.getItem(USER_KEY) ?? "";
 };
 
 export function setSessionUserId(id: string) {
   if (typeof window !== "undefined") {
-    window.localStorage.setItem(USER_KEY, id);
+    if (id.trim()) {
+      window.localStorage.setItem(USER_KEY, id.trim());
+    } else {
+      window.localStorage.removeItem(USER_KEY);
+    }
     changed();
   }
 }
 
-// Direct Supabase app.* RPC dispatcher when authenticated with Supabase, Express fallback in demo mode
-const serverDispatch = async (fn: OutboxFn, args: Record<string, unknown>, itemId?: string): Promise<unknown> => {
+// Authoritative Supabase app.* RPC dispatcher
+const serverDispatch = async (
+  fn: OutboxFn,
+  args: Record<string, unknown>,
+  itemId?: string,
+): Promise<unknown> => {
   const id = itemId || (args.p_id as string) || (args.id as string);
   if (id) setItemProgress(id, 25);
 
@@ -159,13 +163,7 @@ const serverDispatch = async (fn: OutboxFn, args: Record<string, unknown>, itemI
 
   try {
     if (id && inFlightItemIds.has(id)) setItemProgress(id, 60);
-    const result =
-      getAuthMode() === "supabase"
-        ? await dispatchLiveOutboxRpc(fn, args)
-        : await apiFetch<Record<string, unknown>>(`/api/rpc/${encodeURIComponent(fn)}`, {
-            method: "POST",
-            body: JSON.stringify({ args }),
-          });
+    const result = await dispatchLiveOutboxRpc(fn, args);
     if (id) {
       setItemProgress(id, 100);
       await new Promise((r) => setTimeout(r, 80));
@@ -197,6 +195,9 @@ const withDrainLock = async <T>(run: () => Promise<T>): Promise<T | "busy"> => {
 
 const runDrain = async (): Promise<DrainReport> => {
   const userId = await captureUserId();
+  if (!userId) {
+    return { sent: 0, rejected: 0, held: "auth" };
+  }
   if (isOffline()) {
     return { sent: 0, rejected: 0, held: "offline" };
   }
@@ -241,7 +242,7 @@ export async function sync(): Promise<DrainReport> {
   } finally {
     local.draining = null;
   }
-}
+};
 
 export async function syncWithBackoff(
   maxRetries = 3,
@@ -274,14 +275,18 @@ export const quietSync = async (): Promise<void> => {
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function submit(input: SubmitInput): Promise<"sent" | "queued" | "rejected"> {
+  const userId = await captureUserId();
+  if (!userId) {
+    throw new Error("Sign in before saving offline operations.");
+  }
+
   if (inFlightItemIds.has(input.id)) {
     const store = await openIdbStore();
-    const mine = await store.list(await captureUserId());
+    const mine = await store.list(userId);
     const existing = mine.find((it) => it.id === input.id);
     if (existing) return existing.state === "rejected" ? "rejected" : "queued";
   }
 
-  const userId = await captureUserId();
   const store = await openIdbStore();
   await enqueue(store, { ...input, userId, dependsOn: input.dependsOn ?? null });
   changed();
@@ -296,13 +301,17 @@ export async function submit(input: SubmitInput): Promise<"sent" | "queued" | "r
 }
 
 export async function listItems(): Promise<OutboxItem[]> {
+  const userId = await captureUserId();
+  if (!userId) return [];
   const store = await openIdbStore();
-  return store.list(await captureUserId());
+  return store.list(userId);
 }
 
 export async function syncHistory(): Promise<SyncAttempt[]> {
+  const userId = await captureUserId();
+  if (!userId) return [];
   const store = await openIdbStore();
-  return store.history(await captureUserId());
+  return store.history(userId);
 }
 
 export async function retryItem(id: string): Promise<void> {
