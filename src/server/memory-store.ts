@@ -213,7 +213,7 @@ export class MemoryKiranRepository implements KiranRepository {
       activeShift: activeShift ? clone(activeShift) : null,
       currentBagCount: activeShift ? activeShift.openingBagCount : this.getCurrentBagUnits(),
       stats: this.computeMonthlyStats(user),
-      authMode: "demo",
+      authMode: "supabase",
     };
   }
 
@@ -698,27 +698,6 @@ export class MemoryKiranRepository implements KiranRepository {
               ? `${processedCount} order intake ${processedCount === 1 ? "card" : "cards"} approved and converted to delivery.`
               : `${processedCount} order intake ${processedCount === 1 ? "card" : "cards"} declined.`,
         };
-      }
-
-      case "approve_shift": {
-        const shift = this.shifts.find((s) => s.id === input.id);
-        if (!shift) throw new RpcError("Shift record not found.", 404, "P0002");
-        shift.approvalStatus = "approved";
-        return { ok: true, message: "Shift check-in approved." };
-      }
-
-      case "flag_shift": {
-        const shift = this.shifts.find((s) => s.id === input.id);
-        if (!shift) throw new RpcError("Shift record not found.", 404, "P0002");
-        shift.approvalStatus = "flagged";
-        return { ok: true, message: "Shift flagged for review." };
-      }
-
-      case "update_shop_order_status": {
-        const order = this.shopOrders.find((o) => o.id === input.id);
-        if (!order) throw new RpcError("Shop order not found.", 404, "P0002");
-        order.status = input.status;
-        return { ok: true, message: `Order ${order.orderNumber} updated to ${input.status}.` };
       }
 
       case "mark_delivery_delivered": {

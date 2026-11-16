@@ -68,8 +68,11 @@ import { ProductCatalogDrawer } from "./components/product-catalog-drawer";
 import { ProductThumbnail } from "./components/product-thumbnail";
 import { PWAInstallButton } from "./components/pwa-install";
 import { RepMonth } from "./components/rep-month";
-import { SignaturePad } from "./components/signature-pad";
+import { SignaturePad, type SignatureCapturePayload } from "./components/signature-pad";
 import { StorefrontView } from "./components/storefront";
+import { SalonPortal } from "./components/salon-portal";
+import { RepOperationsDrawer } from "./components/rep-operations-drawer";
+import { ensureUuid } from "./lib/supabase-kiran";
 import type {
   DeliveryOrderFull,
   RepMonthlyStats,
@@ -105,11 +108,11 @@ import {
 } from "lucide-react";
 
 const DEFAULT_STATS: RepMonthlyStats = {
-  visitsCompleted: 2,
+  visitsCompleted: 0,
   visitsTarget: 50,
-  cashCollectedPkr: 50500,
-  ordersCount: 3,
-  monthLabel: "November 2026 Target",
+  cashCollectedPkr: 0,
+  ordersCount: 0,
+  monthLabel: "Target",
 };
 
 export default function App() {
@@ -117,20 +120,21 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
   const [authConfigured, setAuthConfigured] = useState(false);
   const [user, setUser] = useState<UserProfile | null>(null);
+  const [salonSessionActive, setSalonSessionActive] = useState(false);
+  const [showPublicStorefront, setShowPublicStorefront] = useState(false);
+  const [showRepOpsDrawer, setShowRepOpsDrawer] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState<"rep" | "manager">("rep");
 
   const [activeTab, setActiveTab] = useState<TabKey>("today");
   const [items, setItems] = useState<OutboxItem[]>([]);
   const [historyItems, setHistoryItems] = useState<SyncAttempt[]>([]);
   const [outboxState, setOutboxState] = useState(syncState());
-  const [salons, setSalons] = useState<SalonWithApproval[]>(INITIAL_SALONS);
-  const [route, setRoute] = useState<RouteStop[]>(() =>
-    applyStoredRouteOrder(INITIAL_ROUTE, loadPreferredRouteOrder()),
-  );
+  const [salons, setSalons] = useState<SalonWithApproval[]>([]);
+  const [route, setRoute] = useState<RouteStop[]>([]);
   const [routeOptimization, setRouteOptimization] = useState<RouteOptimizationResult | null>(null);
   const [optimizingRoute, setOptimizingRoute] = useState(false);
-  const [orders, setOrders] = useState<DeliveryOrderFull[]>(INITIAL_ORDERS);
-  const [skus, setSkus] = useState<SKU[]>(INITIAL_SKUS);
+  const [orders, setOrders] = useState<DeliveryOrderFull[]>([]);
+  const [skus, setSkus] = useState<SKU[]>([]);
   const [monthlyStats, setMonthlyStats] = useState<RepMonthlyStats>(DEFAULT_STATS);
 
   // Rep day shift state (one-tap check-in / check-out, no sample bag counts)
@@ -352,7 +356,30 @@ export default function App() {
   }
 
   if (!user) {
-    return <AuthGate authConfigured={authConfigured} onAuthenticated={handleAuthenticated} />;
+    if (salonSessionActive) {
+      return <SalonPortal onSignOut={() => setSalonSessionActive(false)} showToast={showToast} />;
+    }
+    if (showPublicStorefront) {
+      return (
+        <div className="min-h-screen bg-[#faf7f5] dark:bg-[#171413] p-4 max-w-6xl mx-auto">
+          <StorefrontView
+            onBack={() => setShowPublicStorefront(false)}
+            onOpenSalonPortal={() => {
+              setShowPublicStorefront(false);
+            }}
+            showToast={showToast}
+          />
+        </div>
+      );
+    }
+    return (
+      <AuthGate
+        authConfigured={authConfigured}
+        onAuthenticated={handleAuthenticated}
+        onSalonAuthenticated={() => setSalonSessionActive(true)}
+        onOpenStorefront={() => setShowPublicStorefront(true)}
+      />
+    );
   }
 
   const pendingItems = items.filter((i) => i.state === "pending");
@@ -599,8 +626,9 @@ export default function App() {
     const id = `sal-${Date.now()}`;
     const selectedArea = areas.find((a) => a.id === newSalonAreaId);
     const areaLabel = selectedArea?.name || newSalonArea.trim() || "Karachi";
+    const newId = ensureUuid();
     const newRecord: SalonWithApproval = {
-      id,
+      id: newId,
       name: newSalonName.trim(),
       area: areaLabel,
       address: `${areaLabel}, Karachi`,
@@ -617,11 +645,12 @@ export default function App() {
 
     setSalons([newRecord, ...salons]);
     const res = await submit({
-      id,
+      id: newId,
       fn: "create_salon",
       args: {
-        p_id: id,
+        p_id: newId,
         p_name: newRecord.name,
+        p_type: "unisex",
         p_area: newRecord.area,
         p_area_id: newSalonAreaId || undefined,
         p_phone: newRecord.phone,
@@ -629,7 +658,7 @@ export default function App() {
         p_at_client: new Date().toISOString(),
       },
       label: `New Prospect: ${newRecord.name}`,
-      salonId: id,
+      salonId: newId,
       capturedAt: new Date().toISOString(),
     });
 
@@ -646,21 +675,22 @@ export default function App() {
   };
 
   // 7. Complete Delivery with Attached Digital Signature (Dependent Mutation)
-  const handleConfirmDeliverySignature = async (signatureDataUrl: string) => {
+  const handleConfirmDeliverySignature = async (payload: SignatureCapturePayload) => {
     if (!signingOrderId) return;
     const order = orders.find((o) => o.id === signingOrderId);
     if (!order) return;
 
     setSigningOrderId(null);
 
-    const deliveryId = `del-${Date.now()}`;
+    const deliveryId = ensureUuid();
     const resDelivery = await submit({
       id: deliveryId,
       fn: "rep_submit_delivery",
       args: {
-        p_id: deliveryId,
-        p_order_id: order.id,
-        p_salon_id: order.salon_id,
+        p_client_id: deliveryId,
+        p_order_id: ensureUuid(order.id),
+        p_salon_id: ensureUuid(order.salon_id),
+        p_received_by_name: payload.signatoryName,
         p_total: order.total_amount,
         p_at_client: new Date().toISOString(),
       },
@@ -674,26 +704,37 @@ export default function App() {
       return;
     }
 
-    const sigId = `sig-${Date.now()}`;
+    const sigId = ensureUuid();
     const resSig = await submit({
       id: sigId,
       fn: "rep_attach_signature",
       args: {
-        p_id: sigId,
-        p_delivery_id: deliveryId,
-        p_signature_data: signatureDataUrl.slice(0, 120) + "...[sealed]",
+        p_client_id: sigId,
+        p_submission_id: deliveryId,
+        p_outcome: payload.outcome,
+        p_name: payload.signatoryName,
+        p_designation: payload.designation,
+        p_png_base64: payload.dataUrl,
+        p_note: payload.note || null,
         p_at_client: new Date().toISOString(),
       },
-      label: `Signature for ${order.order_number}`,
+      label: `Signature for ${order.order_number} (${payload.outcome})`,
       salonId: order.salon_id,
       capturedAt: new Date().toISOString(),
-      dependsOn: { itemId: deliveryId, argName: "p_delivery_id" },
+      dependsOn: { itemId: deliveryId, argName: "p_submission_id" },
     });
 
     if (resSig !== "rejected") {
       setOrders((prev) =>
         prev.map((o) =>
-          o.id === order.id ? { ...o, status: "delivered", delivered_at: new Date().toISOString() } : o,
+          o.id === order.id
+            ? {
+                ...o,
+                status: "delivered",
+                delivered_at: new Date().toISOString(),
+                signature_data: payload.dataUrl || payload.outcome,
+              }
+            : o,
         ),
       );
     }
@@ -829,6 +870,17 @@ export default function App() {
               >
                 <Briefcase className="w-3.5 h-3.5 text-[#7a2e4a] dark:text-[#d77a9c]" />
                 <span>{workspaceMode === "rep" ? "Office Manager" : "Field Rep"}</span>
+              </button>
+            )}
+
+            {workspaceMode === "rep" && (
+              <button
+                type="button"
+                onClick={() => setShowRepOpsDrawer(true)}
+                className="px-3 py-1.5 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold flex items-center gap-1.5 hover:border-[#7a2e4a] whitespace-nowrap"
+              >
+                <Package className="w-3.5 h-3.5 text-[#7a2e4a] dark:text-[#d77a9c]" />
+                <span>Bag &amp; Commission</span>
               </button>
             )}
 
@@ -1646,15 +1698,20 @@ export default function App() {
               </div>
             )}
 
-            {/* ================= TAB 3.5: PUBLIC SHOP (khsalon.com) ================= */}
+            {/* ================= TAB 3.5: PUBLIC SHOWCASE (khsalon.com) ================= */}
             {activeTab === "shop" && (
               <StorefrontView
                 onOpenSalonOrderModal={(prodName) => {
-                  const targetSalon = salons[0]?.id || "sal-clifton-01";
+                  if (salons.length === 0) {
+                    showToast("No active salons loaded yet. Register or import salons first.", "warn");
+                    return;
+                  }
+                  const targetSalon = selectedSalonId || salons[0]!.id;
                   setSelectedSalonId(targetSalon);
-                  const matchedSku = skus.find((k) =>
-                    prodName.toLowerCase().includes(k.category.toLowerCase()) ||
-                    k.name.toLowerCase().includes(prodName.split(" ")[0].toLowerCase()),
+                  const matchedSku = skus.find(
+                    (k) =>
+                      prodName.toLowerCase().includes(k.category.toLowerCase()) ||
+                      k.name.toLowerCase().includes(prodName.split(" ")[0]!.toLowerCase()),
                   );
                   if (matchedSku) setSelectedSkuId(matchedSku.id);
                   setSkuSearchQuery("");
@@ -2115,42 +2172,55 @@ export default function App() {
                   <div className="pt-2 border-t border-[#e6dfdb]/60 dark:border-[#3a3330] flex flex-wrap gap-2 text-xs">
                     <button
                       type="button"
+                      disabled={salons.length === 0}
                       onClick={async () => {
+                        const targetSalon = currentSalon || salons[0];
+                        if (!targetSalon) {
+                          showToast("No salon available to enqueue visit.", "warn");
+                          return;
+                        }
                         const id = `tst-${Date.now()}`;
                         await submit({
                           id,
                           fn: "log_visit",
-                          args: { p_id: id, p_salon_id: "sal-clifton-01", p_notes: "Sample field visit" },
-                          label: "Test Field Visit",
-                          salonId: "sal-clifton-01",
+                          args: { p_id: id, p_salon_id: targetSalon.id, p_notes: "Sample field visit" },
+                          label: `Test Visit: ${targetSalon.name}`,
+                          salonId: targetSalon.id,
                           capturedAt: new Date().toISOString(),
                         });
+                        showToast(`Queued test visit for ${targetSalon.name}.`, "ok");
                       }}
-                      className="px-3 py-1.5 rounded-lg bg-black/5 dark:bg-white/5 font-medium hover:bg-black/10"
+                      className="px-3 py-1.5 rounded-lg bg-black/5 dark:bg-white/5 font-medium hover:bg-black/10 disabled:opacity-40"
                     >
                       + Enqueue Visit
                     </button>
 
                     <button
                       type="button"
+                      disabled={salons.length === 0}
                       onClick={async () => {
+                        const targetSalon = currentSalon || salons[0];
+                        if (!targetSalon) {
+                          showToast("No salon available to enqueue note.", "warn");
+                          return;
+                        }
                         const id = `note-${Date.now()}`;
-                        const targetSalonId = currentSalon?.id || salons[0]?.id || "sal-dha-02";
                         await submit({
                           id,
                           fn: "add_salon_note",
                           args: {
                             p_id: id,
-                            p_salon_id: targetSalonId,
+                            p_salon_id: targetSalon.id,
                             p_notes: "Salon owner requested follow-up catalog list.",
                             p_body: "Salon owner requested follow-up catalog list.",
                           },
-                          label: "Test Salon Note",
-                          salonId: targetSalonId,
+                          label: `Test Note: ${targetSalon.name}`,
+                          salonId: targetSalon.id,
                           capturedAt: new Date().toISOString(),
                         });
+                        showToast(`Queued test note for ${targetSalon.name}.`, "ok");
                       }}
-                      className="px-3 py-1.5 rounded-lg bg-black/5 dark:bg-white/5 font-medium hover:bg-black/10"
+                      className="px-3 py-1.5 rounded-lg bg-black/5 dark:bg-white/5 font-medium hover:bg-black/10 disabled:opacity-40"
                     >
                       + Enqueue Salon Note
                     </button>
@@ -2835,6 +2905,14 @@ export default function App() {
           await refreshBootstrap();
           setSelectedSkuId(savedSku.id);
         }}
+        showToast={showToast}
+      />
+
+      {/* Field Rep Operations Drawer (Bag, Blind Count, Commission) */}
+      <RepOperationsDrawer
+        isOpen={showRepOpsDrawer}
+        onClose={() => setShowRepOpsDrawer(false)}
+        skus={skus}
         showToast={showToast}
       />
 

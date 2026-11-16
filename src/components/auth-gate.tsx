@@ -139,11 +139,11 @@ export const AuthGate: React.FC<AuthGateProps> = ({
           if (pkceCode) {
             setLoading(true);
             try {
-              const session = await exchangeSupabaseAuthCode(pkceCode);
+              const token = await exchangeSupabaseAuthCode(pkceCode);
               window.history.replaceState({}, document.title, window.location.pathname);
-              if (session?.access_token && active) {
-                setAuthToken(session.access_token);
-                await routeActiveSession(session.access_token);
+              if (token && active) {
+                setAuthToken(token);
+                await routeActiveSession(token);
                 setLoading(false);
                 return;
               }
@@ -246,10 +246,10 @@ export const AuthGate: React.FC<AuthGateProps> = ({
     setInfoMsg(null);
     setLoading(true);
     try {
-      const session = await signInWithSupabasePassword(email, password);
-      if (session?.access_token) {
-        setAuthToken(session.access_token);
-        await routeActiveSession(session.access_token);
+      const token = await signInWithSupabasePassword(email, password);
+      if (token) {
+        setAuthToken(token);
+        await routeActiveSession(token);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Invalid email or password.");

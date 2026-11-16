@@ -282,12 +282,6 @@ test("public shop order creation and manager approval workflows", async () => {
   assert.ok(shopOrder.orderNumber.startsWith("KH-"));
 
   await repo.handleManagerApproval({
-    action: "update_shop_order_status",
-    id: shopOrder.id,
-    status: "confirmed",
-  });
-
-  await repo.handleManagerApproval({
     action: "approve_salon",
     id: "sal-tariq-05",
     stage: "regular",
@@ -299,7 +293,7 @@ test("public shop order creation and manager approval workflows", async () => {
   });
 
   const overview = await repo.getManagerOverview(repUser);
-  assert.equal(overview.shopOrders[0]?.status, "confirmed");
+  assert.equal(overview.shopOrders[0]?.status, "pending");
   assert.equal(overview.salons.find((s) => s.id === "sal-tariq-05")?.stage, "regular");
   assert.equal(overview.pendingOrderCards.length, 0);
   assert.equal(overview.deliveryOrders.length, 3);
@@ -759,7 +753,7 @@ test("buildDeliveryReceiptPdfModel and createDeliveryReceiptPdfDocument build va
   const salon = INITIAL_SALONS.find((s) => s.id === "sal-clifton-01")!;
 
   const model = buildDeliveryReceiptPdfModel(order, salon);
-  assert.equal(model.filename, "Lumex-Receipt-ORD-KRN-2026-9901.pdf");
+  assert.equal(model.filename, "Kiran-Receipt-ORD-KRN-2026-9901.pdf");
   assert.equal(model.statusLabel, "Delivered");
   assert.equal(model.acknowledgementLabel, "Customer digital signature attached");
   assert.equal(model.invoiceTotalFormatted, "PKR 23,400");

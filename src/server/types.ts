@@ -1,5 +1,5 @@
 import type { CatalogSkuInput } from "../lib/catalog.ts";
-import type { DeliveryOrder, RouteStop, SKU, Salon } from "../lib/data.ts";
+export type { DeliveryOrder, RouteStop, SKU, Salon } from "../lib/data.ts";
 import type { OutboxFn } from "../lib/outbox/types.ts";
 
 export type UserRole = "rep" | "manager" | "owner";

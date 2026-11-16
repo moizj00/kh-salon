@@ -22,12 +22,13 @@ import {
   BookOpen,
 } from "lucide-react";
 import {
-  apiFetch,
+  createOfficialOrderFromForecast,
   fetchManagerOverview,
-  getAuthMode,
   resendDeliveryNotification,
   submitManagerApproval,
 } from "../lib/api";
+import { OfficeOperationsPanels } from "./office-operations-panels";
+import { OwnerInvestorPanel } from "./owner-investor-panel";
 import { canManageCatalog, getSkuBrand } from "../lib/catalog";
 import type { SKU } from "../lib/data";
 import { downloadDeliveryOrdersCsv } from "../lib/csv";
@@ -69,7 +70,15 @@ interface ManagerDashboardProps {
   userRole?: UserRole;
 }
 
-type ManagerSection = "approvals" | "ledger" | "salon-stock" | "collections" | "orders" | "inventory";
+type ManagerSection =
+  | "approvals"
+  | "operations"
+  | "investors"
+  | "ledger"
+  | "salon-stock"
+  | "collections"
+  | "orders"
+  | "inventory";
 
 export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
   showToast,
@@ -346,40 +355,23 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
     unitPrice: number;
     notes?: string;
   }) => {
-    const cardId = `crd-${Date.now()}`;
-    if (getAuthMode() === "supabase") {
-      const client = await getSupabaseClient();
-      if (client) {
-        const { error } = await client.schema("app").rpc("rep_create_card", {
-          p_id: ensureUuid(),
-          p_salon_id: ensureUuid(card.salonId),
-          p_body: card.notes || `Proactive restock order: ${card.qty}x ${card.skuName}`,
-          p_items: [
-            {
-              sku_id: ensureUuid(card.skuId),
-              qty: card.qty,
-              price_paisa: Math.round(card.unitPrice * 100),
-            },
-          ],
-        });
-        if (error) {
-          throw new Error(error.message || "Failed to create restock card in Supabase.");
-        }
-      }
-    } else {
-      await apiFetch("/api/rpc/rep_create_card", {
-        method: "POST",
-        body: JSON.stringify({
-          p_id: cardId,
-          p_salon_id: card.salonId,
-          p_sku_id: card.skuId,
-          p_sku_name: card.skuName,
-          p_qty: card.qty,
-          p_total: card.unitPrice * card.qty,
-          p_notes: card.notes || null,
-          p_at_client: new Date().toISOString(),
-        }),
+    const client = await getSupabaseClient();
+    if (client) {
+      const { error } = await client.schema("app").rpc("rep_create_card", {
+        p_id: ensureUuid(),
+        p_salon_id: ensureUuid(card.salonId),
+        p_body: card.notes || `Proactive restock order: ${card.qty}x ${card.skuName}`,
+        p_items: [
+          {
+            sku_id: ensureUuid(card.skuId),
+            qty: card.qty,
+            price_paisa: Math.round(card.unitPrice * 100),
+          },
+        ],
       });
+      if (error) {
+        throw new Error(error.message || "Failed to create restock card in Supabase.");
+      }
     }
     await load();
     onApprovedChange?.();
@@ -444,9 +436,13 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
     { id: "approvals" as const, label: `Approvals (${pendingApprovalCount})`, icon: ClipboardCheck },
     ...(isManagerOrOwner
       ? [
+          { id: "operations" as const, label: "Office Operations", icon: Layers },
           { id: "ledger" as const, label: "Cash & Bank Ledger", icon: Coins },
           { id: "salon-stock" as const, label: "Salon Stock & Restock Alerts", icon: BellRing },
         ]
+      : []),
+    ...(userRole === "owner"
+      ? [{ id: "investors" as const, label: "Investor Capital & Profit", icon: Coins }]
       : []),
     { id: "collections" as const, label: "Collections & Salons", icon: Building2 },
     { id: "orders" as const, label: `Shop & Deliveries (${data.shopOrders.length})`, icon: ShoppingBag },
@@ -896,30 +892,15 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                           {shift.closedAt ? when(shift.closedAt) : "—"}
                         </td>
                         <td className="py-2.5 pl-3 text-right">
-                          {shift.approvalStatus === "approved" ? (
-                            <span className="text-emerald-700 dark:text-emerald-400 font-semibold">
-                              Approved
-                            </span>
-                          ) : (
-                            <div className="flex items-center justify-end gap-1.5">
-                              <button
-                                type="button"
-                                disabled={busyId === shift.id}
-                                onClick={() => runAction({ action: "approve_shift", id: shift.id })}
-                                className="px-2.5 py-1 rounded-lg bg-emerald-700 text-white font-semibold"
-                              >
-                                Approve
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busyId === shift.id}
-                                onClick={() => runAction({ action: "flag_shift", id: shift.id })}
-                                className="px-2.5 py-1 rounded-lg border border-[#e6dfdb] dark:border-[#3a3330] text-rose-600 font-medium"
-                              >
-                                Flag
-                              </button>
-                            </div>
-                          )}
+                          <span
+                            className={`text-xs font-semibold px-2.5 py-1 rounded-lg ${
+                              shift.status === "open"
+                                ? "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
+                                : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
+                            }`}
+                          >
+                            {shift.status === "open" ? "Active Shift" : "Shift Closed"}
+                          </span>
                         </td>
                       </tr>
                     ))}
@@ -969,13 +950,41 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
           userRole={userRole}
           showToast={showToast}
           onDraftRestockCard={handleDraftRestockCard}
+          onCreateOfficialOrder={async (ord) => {
+            await createOfficialOrderFromForecast(ord);
+            await load();
+            onApprovedChange?.();
+          }}
         />
       )}
 
-      {!isManagerOrOwner && (section === "ledger" || section === "salon-stock") && (
+      {/* ================= SECTION: OFFICE OPERATIONS ================= */}
+      {section === "operations" && isManagerOrOwner && (
+        <OfficeOperationsPanels
+          currentUser={{
+            id: "office-manager",
+            email: "office@khsalon.com",
+            fullName: "Office Management",
+            role: userRole,
+            territory: "Karachi",
+            monthlyVisitTarget: 50,
+          }}
+          skus={data.skus}
+          salons={data.salons}
+          showToast={showToast}
+          onRefreshParent={load}
+        />
+      )}
+
+      {/* ================= SECTION: OWNER INVESTORS LEDGER ================= */}
+      {section === "investors" && userRole === "owner" && (
+        <OwnerInvestorPanel showToast={showToast} />
+      )}
+
+      {!isManagerOrOwner && (section === "ledger" || section === "salon-stock" || section === "operations" || section === "investors") && (
         <div className="p-6 rounded-2xl bg-white dark:bg-[#211d1b] border border-amber-200 dark:border-amber-900/50 text-center space-y-2">
           <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">
-            Access Restricted: Client Salon Stock and Cash Ledger are strictly reserved for Office Manager and Owner roles.
+            Access Restricted: Client Salon Stock, Operations, and Cash Ledger are strictly reserved for Office Manager and Owner roles.
           </p>
           <button
             type="button"
@@ -1233,39 +1242,10 @@ export const ManagerDashboard: React.FC<ManagerDashboardProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex flex-wrap gap-2">
-                      {ord.status === "pending" && (
-                        <button
-                          type="button"
-                          disabled={busyId === ord.id}
-                          onClick={() =>
-                            runAction({
-                              action: "update_shop_order_status",
-                              id: ord.id,
-                              status: "confirmed",
-                            })
-                          }
-                          className="px-3 py-1.5 rounded-lg bg-[#7a2e4a] text-white font-semibold"
-                        >
-                          Confirm Order
-                        </button>
-                      )}
-                      {ord.status !== "dispatched" && (
-                        <button
-                          type="button"
-                          disabled={busyId === ord.id}
-                          onClick={() =>
-                            runAction({
-                              action: "update_shop_order_status",
-                              id: ord.id,
-                              status: "dispatched",
-                            })
-                          }
-                          className="px-3 py-1.5 rounded-lg bg-emerald-700 text-white font-semibold"
-                        >
-                          Mark Dispatched
-                        </button>
-                      )}
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-black/5 dark:bg-white/5 uppercase">
+                        {ord.status}
+                      </span>
                     </div>
                   </div>
                 ))}

@@ -1,7 +1,17 @@
 import React, { useState } from "react";
-import { Check, ExternalLink, PackageCheck, ShieldCheck, ShoppingBag, Store, X } from "lucide-react";
-import { submitShopOrder } from "../lib/api";
-import type { PublicShopOrder } from "../server/types";
+import {
+  ArrowLeft,
+  Check,
+  ExternalLink,
+  Info,
+  LogIn,
+  MapPin,
+  PhoneCall,
+  ShieldCheck,
+  ShoppingBag,
+  Store,
+  X,
+} from "lucide-react";
 import muskColorImg from "../assets/images/musk_hair_color_cream_1794525597659.jpg";
 import lunexBleachImg from "../assets/images/lunex_bleach_powder_tub_1794525597118.jpg";
 import kemonShampooImg from "../assets/images/kemon_color_shampoo_bottle_1794525597500.jpg";
@@ -124,24 +134,15 @@ const ProductImage: React.FC<{ src: string; alt: string; brand: string }> = ({ s
 };
 
 export const StorefrontView: React.FC<{
-  onOpenSalonOrderModal: (productName: string) => void;
-  showToast: (msg: string, type?: "ok" | "info" | "warn") => void;
-  onOrderCreated?: (order: PublicShopOrder) => void;
-}> = ({ onOpenSalonOrderModal, showToast, onOrderCreated }) => {
+  onOpenSalonOrderModal?: (productName: string) => void;
+  onOpenSalonPortal?: () => void;
+  onBack?: () => void;
+  showToast?: (msg: string, type?: "ok" | "info" | "warn") => void;
+}> = ({ onOpenSalonOrderModal, onOpenSalonPortal, onBack, showToast }) => {
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [activeProduct, setActiveProduct] = useState<StorefrontProduct | null>(null);
   const [selectedShadeId, setSelectedShadeId] = useState<string | null>(null);
-
-  // Direct Checkout modal state
-  const [checkoutProduct, setCheckoutProduct] = useState<StorefrontProduct | null>(null);
-  const [checkoutShadeId, setCheckoutShadeId] = useState<string>("");
-  const [checkoutQty, setCheckoutQty] = useState<number>(1);
-  const [customerName, setCustomerName] = useState<string>("");
-  const [customerPhone, setCustomerPhone] = useState<string>("");
-  const [deliveryAddress, setDeliveryAddress] = useState<string>("");
-  const [checkoutError, setCheckoutError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState<boolean>(false);
-  const [confirmedOrder, setConfirmedOrder] = useState<PublicShopOrder | null>(null);
+  const [inquiryProduct, setInquiryProduct] = useState<StorefrontProduct | null>(null);
 
   const categories = [
     { id: "all", label: "All Products" },
@@ -156,81 +157,65 @@ export const StorefrontView: React.FC<{
       ? INITIAL_STOREFRONT_PRODUCTS
       : INITIAL_STOREFRONT_PRODUCTS.filter((p) => p.category_slug === selectedCategory);
 
-  const openCheckout = (product: StorefrontProduct, shadeId?: string | null) => {
-    setCheckoutProduct(product);
-    setCheckoutShadeId(shadeId || product.shades[0]?.id || "");
-    setCheckoutQty(1);
-    setCheckoutError(null);
-    setConfirmedOrder(null);
-  };
-
-  const handlePlaceOrder = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!checkoutProduct) return;
-    const shade =
-      checkoutProduct.shades.find((s) => s.id === checkoutShadeId) || checkoutProduct.shades[0];
-    if (!shade) return;
-
-    if (!customerName.trim() || !customerPhone.trim() || !deliveryAddress.trim()) {
-      setCheckoutError("Please enter your full name, mobile number, and delivery address.");
-      return;
-    }
-
-    setCheckoutError(null);
-    setSubmitting(true);
-    try {
-      const created = await submitShopOrder({
-        productId: checkoutProduct.id,
-        productName: checkoutProduct.name,
-        shadeCode: shade.code,
-        shadeVariant: shade.variant,
-        qty: checkoutQty,
-        unitPricePkr: shade.list_price_pkr,
-        customerName: customerName.trim(),
-        customerPhone: customerPhone.trim(),
-        deliveryAddress: deliveryAddress.trim(),
-      });
-      setConfirmedOrder(created);
-      setCustomerName("");
-      setCustomerPhone("");
-      setDeliveryAddress("");
-      onOrderCreated?.(created);
-      showToast(`Order ${created.orderNumber} saved (PKR ${created.totalPkr.toLocaleString()}).`, "ok");
-    } catch (err) {
-      setCheckoutError(err instanceof Error ? err.message : "Could not place order.");
-    } finally {
-      setSubmitting(false);
+  const handleSalonAction = (productName: string) => {
+    if (onOpenSalonPortal) {
+      onOpenSalonPortal();
+    } else if (onOpenSalonOrderModal) {
+      onOpenSalonOrderModal(productName);
+    } else {
+      showToast?.("Please sign in through the Salon Portal tab to access wholesale pricing.", "info");
     }
   };
-
-  const activeCheckoutShade = checkoutProduct
-    ? checkoutProduct.shades.find((s) => s.id === checkoutShadeId) || checkoutProduct.shades[0]
-    : null;
 
   return (
     <div className="space-y-4">
       {/* Brand Storefront Banner */}
-      <div className="p-5 rounded-2xl bg-gradient-to-r from-[#7a2e4a] to-[#4a182c] text-white shadow-sm space-y-2.5">
+      <div className="p-5 rounded-2xl bg-gradient-to-r from-[#7a2e4a] to-[#4a182c] text-white shadow-sm space-y-3">
         <div className="flex items-center justify-between text-xs text-white/85">
-          <span className="font-semibold tracking-wide">Official Public Storefront</span>
+          <div className="flex items-center gap-2">
+            {onBack && (
+              <button
+                type="button"
+                onClick={onBack}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white font-medium"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Sign-In</span>
+              </button>
+            )}
+            <span className="font-semibold tracking-wide">Public Product Showcase</span>
+          </div>
           <span className="text-amber-200 font-mono">khsalon.com</span>
         </div>
 
-        <div>
-          <h2 className="font-extrabold text-xl tracking-tight">KH Enterprises Store</h2>
-          <p className="text-xs text-white/80 mt-0.5">
-            Official Pakistan distributor of Musk, Lunex, Kemon & Kiran Professional.
-          </p>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-extrabold text-xl tracking-tight">KH Enterprises Showcase</h2>
+            <p className="text-xs text-white/80 mt-0.5">
+              Official Pakistan distributor of Mocheqi Musk, Lunex, Kemon & Kiran Professional.
+            </p>
+          </div>
+
+          {onOpenSalonPortal && (
+            <button
+              type="button"
+              onClick={onOpenSalonPortal}
+              className="px-4 py-2 rounded-xl bg-white text-[#7a2e4a] font-bold text-xs flex items-center gap-1.5 shadow-md hover:bg-amber-50 shrink-0"
+            >
+              <LogIn className="w-3.5 h-3.5" />
+              <span>Salon Partner Portal Sign-In</span>
+            </button>
+          )}
         </div>
 
         <div className="pt-2.5 border-t border-white/15 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-100">
           <div className="flex items-center gap-1.5">
             <ShieldCheck className="w-4 h-4 text-emerald-300 shrink-0" />
-            <span>Direct Retail Checkout (PKR)</span>
+            <span>Authorized Commercial Importer & Wholesale Distributor</span>
           </div>
           <div className="flex items-center gap-1.5 font-medium">
             <Store className="w-4 h-4 shrink-0" />
-            <span>Physical Hub: KH Salon, Karachi</span>
+            <span>Central Distribution Hub: KH Salon, Karachi</span>
           </div>
         </div>
       </div>
@@ -312,18 +297,18 @@ export const StorefrontView: React.FC<{
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => onOpenSalonOrderModal(product.name)}
-                  className="px-3 py-2 rounded-xl bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 border border-amber-300/50 font-semibold whitespace-nowrap hover:bg-amber-100"
+                  onClick={() => setInquiryProduct(product)}
+                  className="px-3 py-2 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-[#6b625e] dark:text-[#a59b96] font-medium whitespace-nowrap hover:text-[#1d1a19]"
                 >
-                  Salon Pricing
+                  Availability
                 </button>
 
                 <button
                   type="button"
-                  onClick={() => openCheckout(product, product.shades[0]?.id)}
+                  onClick={() => handleSalonAction(product.name)}
                   className="px-3.5 py-2 rounded-xl bg-[#7a2e4a] text-white font-semibold flex items-center gap-1.5 shadow-xs hover:opacity-95 whitespace-nowrap"
                 >
-                  <span>Buy Direct</span>
+                  <span>Salon Portal Pricing</span>
                   <ExternalLink className="w-3.5 h-3.5" />
                 </button>
               </div>
@@ -374,7 +359,7 @@ export const StorefrontView: React.FC<{
             </div>
 
             <div className="space-y-2 text-xs">
-              <div className="font-semibold text-[#1d1a19] dark:text-[#f2eeec]">Select Option / Shade</div>
+              <div className="font-semibold text-[#1d1a19] dark:text-[#f2eeec]">Available Options / Shades</div>
               <div className="grid grid-cols-2 gap-2">
                 {activeProduct.shades.map((s) => (
                   <button
@@ -400,26 +385,25 @@ export const StorefrontView: React.FC<{
               <button
                 type="button"
                 onClick={() => {
-                  const name = activeProduct.name;
+                  const p = activeProduct;
                   setActiveProduct(null);
-                  onOpenSalonOrderModal(name);
+                  setInquiryProduct(p);
                 }}
-                className="flex-1 py-2.5 rounded-xl border border-[#7a2e4a] text-[#7a2e4a] dark:text-[#d77a9c] font-bold text-xs"
+                className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] text-xs font-semibold"
               >
-                Salon Portal Order
+                Retail Inquiry
               </button>
 
               <button
                 type="button"
                 onClick={() => {
-                  const p = activeProduct;
-                  const shade = selectedShadeId;
+                  const name = activeProduct.name;
                   setActiveProduct(null);
-                  openCheckout(p, shade);
+                  handleSalonAction(name);
                 }}
                 className="flex-1 py-2.5 rounded-xl bg-[#7a2e4a] text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs"
               >
-                <span>Buy Direct</span>
+                <span>Salon Portal Order</span>
                 <ExternalLink className="w-3.5 h-3.5" />
               </button>
             </div>
@@ -427,186 +411,67 @@ export const StorefrontView: React.FC<{
         </div>
       )}
 
-      {/* Direct Checkout Modal */}
-      {checkoutProduct && activeCheckoutShade && (
+      {/* Inquiry / Store Location Modal */}
+      {inquiryProduct && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-md rounded-2xl bg-white dark:bg-[#211d1b] p-5 shadow-2xl border border-[#e6dfdb] dark:border-[#3a3330] space-y-4 max-h-[90vh] overflow-y-auto">
+          <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#211d1b] p-5 shadow-2xl border border-[#e6dfdb] dark:border-[#3a3330] space-y-4">
             <div className="flex items-start justify-between gap-2">
               <div>
-                <div className="text-xs font-semibold text-[#7a2e4a] dark:text-[#d77a9c]">
-                  khsalon.com · Direct Checkout
-                </div>
-                <h3 className="font-bold text-base text-[#1d1a19] dark:text-[#f2eeec]">
-                  {confirmedOrder ? "Order Confirmed" : checkoutProduct.name}
+                <span className="text-[11px] font-semibold text-[#7a2e4a] dark:text-[#d77a9c]">
+                  KH Enterprises Support
+                </span>
+                <h3 className="font-bold text-sm text-[#1d1a19] dark:text-[#f2eeec]">
+                  Retail Availability & Consultation
                 </h3>
               </div>
               <button
                 type="button"
-                aria-label="Close checkout"
-                onClick={() => {
-                  setCheckoutProduct(null);
-                  setConfirmedOrder(null);
-                }}
-                className="p-2 text-[#6b625e] hover:text-[#1d1a19] dark:hover:text-white rounded-lg"
+                onClick={() => setInquiryProduct(null)}
+                className="p-1.5 rounded-lg text-[#6b625e] hover:text-[#1d1a19]"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            {confirmedOrder ? (
-              <div className="space-y-4">
-                <div className="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 space-y-2 text-xs">
-                  <div className="flex items-center gap-2 font-bold text-emerald-800 dark:text-emerald-300 text-sm">
-                    <PackageCheck className="w-5 h-5" />
-                    <span>Saved to KH Enterprises Dispatch</span>
-                  </div>
-                  <div className="flex justify-between pt-1">
-                    <span className="text-[#6b625e] dark:text-[#a59b96]">Order Reference</span>
-                    <span className="font-mono font-bold text-[#1d1a19] dark:text-[#f2eeec]">
-                      {confirmedOrder.orderNumber}
+            <div className="text-xs space-y-3">
+              <p className="text-[#6b625e] dark:text-[#a59b96] leading-relaxed">
+                To purchase <strong>{inquiryProduct.name}</strong> as a retail client or stylist,
+                contact our central salon hub or visit our Karachi facility:
+              </p>
+
+              <div className="p-3 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb]/60 dark:border-[#3a3330] space-y-2">
+                <div className="flex items-start gap-2">
+                  <MapPin className="w-4 h-4 text-[#7a2e4a] shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold block text-[#1d1a19] dark:text-[#f2eeec]">
+                      KH Salon Flagship Hub
                     </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-[#6b625e] dark:text-[#a59b96]">Item</span>
-                    <span className="font-medium text-right">
-                      {confirmedOrder.qty}x {confirmedOrder.shadeVariant}
+                    <span className="text-[11px] text-[#6b625e] dark:text-[#a59b96]">
+                      Clifton Block 4 / DHA Phase 5, Karachi, Pakistan
                     </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-[#6b625e] dark:text-[#a59b96]">Total COD</span>
-                    <span className="font-bold tabular-nums text-[#7a2e4a] dark:text-[#d77a9c]">
-                      PKR {confirmedOrder.totalPkr.toLocaleString()}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-[#6b625e] dark:text-[#a59b96]">Status</span>
-                    <span className="font-semibold capitalize">{confirmedOrder.status}</span>
                   </div>
                 </div>
 
+                <div className="flex items-center gap-2 pt-1 border-t border-[#e6dfdb]/50">
+                  <PhoneCall className="w-4 h-4 text-[#7a2e4a] shrink-0" />
+                  <span className="font-mono font-semibold text-[11px]">021-35800000 / 0300-KHSALON</span>
+                </div>
+              </div>
+
+              {onOpenSalonPortal && (
                 <button
                   type="button"
                   onClick={() => {
-                    setCheckoutProduct(null);
-                    setConfirmedOrder(null);
+                    setInquiryProduct(null);
+                    onOpenSalonPortal();
                   }}
                   className="w-full py-2.5 rounded-xl bg-[#7a2e4a] text-white font-semibold text-xs flex items-center justify-center gap-1.5"
                 >
-                  <Check className="w-4 h-4" />
-                  <span>Done</span>
+                  <LogIn className="w-3.5 h-3.5" />
+                  <span>Salon Partner Portal Sign-In</span>
                 </button>
-              </div>
-            ) : (
-              <form onSubmit={handlePlaceOrder} className="space-y-3 text-xs">
-                {checkoutError && (
-                  <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300">
-                    {checkoutError}
-                  </div>
-                )}
-
-                <div>
-                  <label htmlFor="shop-shade" className="block font-semibold mb-1">
-                    Option / Shade
-                  </label>
-                  <select
-                    id="shop-shade"
-                    value={activeCheckoutShade.id}
-                    onChange={(e) => setCheckoutShadeId(e.target.value)}
-                    className="w-full p-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
-                  >
-                    {checkoutProduct.shades.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.variant} — PKR {s.list_price_pkr.toLocaleString()}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label htmlFor="shop-qty" className="block font-semibold mb-1">
-                    Quantity
-                  </label>
-                  <input
-                    id="shop-qty"
-                    type="number"
-                    min={1}
-                    max={50}
-                    value={checkoutQty}
-                    onChange={(e) => setCheckoutQty(Math.max(1, Number(e.target.value) || 1))}
-                    className="w-full p-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413] font-bold tabular-nums"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="shop-name" className="block font-semibold mb-1">
-                    Full Name
-                  </label>
-                  <input
-                    id="shop-name"
-                    type="text"
-                    required
-                    placeholder="e.g. Ayesha Siddiqui"
-                    value={customerName}
-                    onChange={(e) => setCustomerName(e.target.value)}
-                    className="w-full p-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="shop-phone" className="block font-semibold mb-1">
-                    Mobile Phone
-                  </label>
-                  <input
-                    id="shop-phone"
-                    type="tel"
-                    required
-                    placeholder="0300-1234567"
-                    value={customerPhone}
-                    onChange={(e) => setCustomerPhone(e.target.value)}
-                    className="w-full p-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="shop-address" className="block font-semibold mb-1">
-                    Delivery Address (Karachi / Pakistan)
-                  </label>
-                  <textarea
-                    id="shop-address"
-                    rows={2}
-                    required
-                    placeholder="House / Suite, Street, Block, Area"
-                    value={deliveryAddress}
-                    onChange={(e) => setDeliveryAddress(e.target.value)}
-                    className="w-full p-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] bg-[#faf7f5] dark:bg-[#171413]"
-                  />
-                </div>
-
-                <div className="p-3 rounded-xl bg-[#faf7f5] dark:bg-[#171413] border border-[#e6dfdb]/60 dark:border-[#3a3330] flex items-center justify-between font-bold">
-                  <span>Order Total (Cash on Delivery)</span>
-                  <span className="text-sm text-[#7a2e4a] dark:text-[#d77a9c] tabular-nums">
-                    PKR {(activeCheckoutShade.list_price_pkr * checkoutQty).toLocaleString()}
-                  </span>
-                </div>
-
-                <div className="flex gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => setCheckoutProduct(null)}
-                    className="flex-1 py-2.5 rounded-xl border border-[#e6dfdb] dark:border-[#3a3330] font-semibold"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={submitting}
-                    className="flex-1 py-2.5 rounded-xl bg-[#7a2e4a] text-white font-semibold disabled:opacity-50"
-                  >
-                    {submitting ? "Placing Order..." : "Confirm Direct Order"}
-                  </button>
-                </div>
-              </form>
-            )}
+              )}
+            </div>
           </div>
         </div>
       )}

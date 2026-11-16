@@ -1768,7 +1768,7 @@ export async function bulkImportLiveSalons(
     const { error } = await client.schema("app").rpc("create_salon", {
       p_id: ensureUuid(),
       p_name: name,
-      p_type: "salon",
+      p_type: "unisex",
       p_area_id: matchedArea.id,
       p_source: "manual",
       p_address: s.area?.trim() || matchedArea.name,
